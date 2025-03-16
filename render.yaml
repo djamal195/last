@@ -1,9 +1,12 @@
 services:
   - type: web
-    name: messenger-bot
+    name: jekle-app
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn api.webhook:app
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.9.0
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /opt/render/data
+      sizeGB: 10
+
