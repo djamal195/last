@@ -227,3 +227,31 @@ def get_video_details(video_id):
     """
     return youtube_api.get_video_details(video_id)
 
+# Fonctions avec les noms originaux pour maintenir la compatibilité
+def search_youtube(query, max_results=5):
+    """
+    Fonction d'aide pour rechercher des vidéos YouTube (nom original)
+    """
+    return search_videos(query, max_results)
+
+def download_youtube_video(video_id, output_path=None):
+    """
+    Fonction pour simuler le téléchargement d'une vidéo YouTube
+    
+    Note: Cette fonction est incluse pour maintenir la compatibilité avec le code existant,
+    mais elle ne télécharge pas réellement la vidéo car cela nécessiterait des bibliothèques
+    supplémentaires comme pytube ou youtube-dl.
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin du fichier téléchargé ou None en cas d'erreur
+    """
+    logger.warning("La fonction download_youtube_video est appelée mais n'est pas implémentée")
+    logger.warning("Pour télécharger des vidéos, installez pytube ou youtube-dl et implémentez cette fonction")
+    
+    # Retourner None pour indiquer que le téléchargement a échoué
+    return None
+
