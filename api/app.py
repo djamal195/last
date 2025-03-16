@@ -1,8 +1,6 @@
-from flask import Flask
-from api.webhook import webhook_blueprint  # Import du webhook si c'est un Blueprint
+# app.py - Redirect to the actual application
+from api.webhook import app
 
-app = Flask(__name__)
-app.register_blueprint(webhook_blueprint)  # Si nécessaire
+# This file exists only to redirect Render to the actual application
+# The app variable should match whatever your Flask/FastAPI application is named in webhook.py
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
