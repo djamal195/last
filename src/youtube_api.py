@@ -3,6 +3,7 @@ import json
 import requests
 from typing import List, Dict, Optional, Any
 import logging
+import traceback
 
 # Configuration du logger
 from src.utils.logger import get_logger
@@ -58,8 +59,8 @@ class YouTubeAPI:
             # Analyser la réponse
             data = response.json()
             
-            # Journaliser la structure de la réponse pour le débogage
-            logger.debug(f"Structure de la réponse YouTube: {json.dumps(data, indent=2)}")
+            # Journaliser la structure complète de la réponse pour le débogage
+            logger.info(f"Structure complète de la réponse YouTube: {json.dumps(data, indent=2)}")
             
             # Vérifier si des résultats ont été trouvés
             if 'items' not in data or not data['items']:
@@ -68,23 +69,55 @@ class YouTubeAPI:
             
             # Extraire les informations des vidéos
             videos = []
-            for item in data['items']:
+            for i, item in enumerate(data['items']):
                 try:
+                    logger.info(f"Traitement de l'élément {i}: {json.dumps(item, indent=2)}")
+                    
                     # Extraire l'ID de la vidéo avec vérification de sécurité
                     if 'id' not in item:
                         logger.warning(f"Élément sans 'id': {item}")
                         continue
-                        
+                    
+                    logger.info(f"Structure de l'ID: {json.dumps(item['id'], indent=2)}")
+                    
                     video_id = None
-                    if isinstance(item['id'], dict) and 'videoId' in item['id']:
-                        video_id = item['id']['videoId']
+                    if isinstance(item['id'], dict):
+                        if 'videoId' in item['id']:
+                            video_id = item['id']['videoId']
+                            logger.info(f"ID de vidéo extrait du dictionnaire: {video_id}")
+                        else:
+                            logger.warning(f"Clé 'videoId' manquante dans item['id']: {item['id']}")
+                            # Essayer d'autres clés possibles
+                            for key in item['id']:
+                                if isinstance(item['id'][key], str) and len(item['id'][key]) > 5:
+                                    video_id = item['id'][key]
+                                    logger.info(f"ID de vidéo extrait d'une clé alternative '{key}': {video_id}")
+                                    break
                     elif isinstance(item['id'], str):
                         video_id = item['id']
+                        logger.info(f"ID de vidéo extrait directement: {video_id}")
                     else:
-                        logger.warning(f"Format d'ID non reconnu: {item['id']}")
+                        logger.warning(f"Format d'ID non reconnu: {type(item['id'])}")
                         continue
                     
                     if not video_id:
+                        # Essayer d'extraire l'ID de l'URL si disponible
+                        if 'snippet' in item and 'thumbnails' in item['snippet']:
+                            for quality in ['high', 'medium', 'default']:
+                                if quality in item['snippet']['thumbnails'] and 'url' in item['snippet']['thumbnails'][quality]:
+                                    url = item['snippet']['thumbnails'][quality]['url']
+                                    # Les URL des miniatures YouTube contiennent souvent l'ID de la vidéo
+                                    if 'vi/' in url and '/default.jpg' in url:
+                                        parts = url.split('vi/')
+                                        if len(parts) > 1:
+                                            potential_id = parts[1].split('/')[0]
+                                            if len(potential_id) > 5:  # Les ID YouTube sont généralement plus longs
+                                                video_id = potential_id
+                                                logger.info(f"ID de vidéo extrait de l'URL de la miniature: {video_id}")
+                                                break
+                    
+                    if not video_id:
+                        logger.warning("Impossible d'extraire l'ID de la vidéo, élément ignoré")
                         continue
                     
                     # Extraire les autres informations avec vérification
@@ -103,19 +136,24 @@ class YouTubeAPI:
                             break
                     
                     if not thumbnail_url:
-                        thumbnail_url = "https://i.ytimg.com/vi/default/hqdefault.jpg"  # Image par défaut
+                        thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"  # URL basée sur l'ID
                     
-                    # Ajouter la vidéo à la liste
-                    videos.append({
+                    # Créer un objet vidéo avec l'ID explicitement défini
+                    video = {
                         'id': video_id,
+                        'videoId': video_id,  # Ajouter explicitement videoId pour la compatibilité
                         'title': title,
                         'description': description,
                         'thumbnail': thumbnail_url,
                         'url': f"https://www.youtube.com/watch?v={video_id}"
-                    })
+                    }
                     
-                except KeyError as e:
-                    logger.warning(f"Impossible d'extraire les informations de la vidéo: {str(e)}")
+                    logger.info(f"Vidéo extraite avec succès: {json.dumps(video, indent=2)}")
+                    videos.append(video)
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'extraction des informations de la vidéo: {str(e)}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     continue
             
             logger.info(f"Recherche YouTube réussie: {len(videos)} vidéos trouvées")
@@ -123,12 +161,15 @@ class YouTubeAPI:
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Erreur de requête lors de la recherche YouTube: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
         except json.JSONDecodeError as e:
             logger.error(f"Erreur de décodage JSON lors de la recherche YouTube: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
         except Exception as e:
             logger.error(f"Erreur inattendue lors de la recherche YouTube: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     def get_video_details(self, video_id: str) -> Optional[Dict[str, Any]]:
@@ -177,6 +218,7 @@ class YouTubeAPI:
             # Construire l'objet de détails
             video_details = {
                 'id': video_id,
+                'videoId': video_id,  # Ajouter explicitement videoId pour la compatibilité
                 'title': snippet.get('title', 'Titre non disponible'),
                 'description': snippet.get('description', 'Description non disponible'),
                 'publishedAt': snippet.get('publishedAt', ''),
@@ -196,7 +238,7 @@ class YouTubeAPI:
                     break
             
             if 'thumbnail' not in video_details:
-                video_details['thumbnail'] = "https://i.ytimg.com/vi/default/hqdefault.jpg"
+                video_details['thumbnail'] = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
             
             logger.info(f"Détails récupérés avec succès pour la vidéo: {video_id}")
             return video_details
@@ -231,8 +273,29 @@ def get_video_details(video_id):
 def search_youtube(query, max_results=5):
     """
     Fonction d'aide pour rechercher des vidéos YouTube (nom original)
+    
+    Cette fonction est conçue pour être compatible avec le code existant.
+    Elle s'assure que chaque vidéo dans les résultats a un champ 'videoId'.
     """
-    return search_videos(query, max_results)
+    try:
+        logger.info(f"Appel de search_youtube avec query={query}, max_results={max_results}")
+        videos = search_videos(query, max_results)
+        
+        if videos is None:
+            logger.warning("search_videos a retourné None")
+            return None
+            
+        # S'assurer que chaque vidéo a un champ 'videoId'
+        for video in videos:
+            if 'id' in video and 'videoId' not in video:
+                video['videoId'] = video['id']
+                
+        logger.info(f"search_youtube a trouvé {len(videos)} vidéos")
+        return videos
+    except Exception as e:
+        logger.error(f"Erreur dans search_youtube: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None
 
 def download_youtube_video(video_id, output_path=None):
     """
