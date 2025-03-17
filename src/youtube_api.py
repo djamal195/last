@@ -1,13 +1,24 @@
 import os
 import json
 import requests
+import traceback
 from typing import List, Dict, Optional, Any
 import logging
-import traceback
+import tempfile
+import shutil
+import uuid
 
 # Configuration du logger
 from src.utils.logger import get_logger
 logger = get_logger(__name__)
+
+# Importer pytube pour le téléchargement de vidéos
+try:
+    from pytube import YouTube
+    PYTUBE_AVAILABLE = True
+except ImportError:
+    logger.warning("La bibliothèque pytube n'est pas installée. Le téléchargement de vidéos ne sera pas disponible.")
+    PYTUBE_AVAILABLE = False
 
 class YouTubeAPI:
     """
@@ -299,22 +310,52 @@ def search_youtube(query, max_results=5):
 
 def download_youtube_video(video_id, output_path=None):
     """
-    Fonction pour simuler le téléchargement d'une vidéo YouTube
-    
-    Note: Cette fonction est incluse pour maintenir la compatibilité avec le code existant,
-    mais elle ne télécharge pas réellement la vidéo car cela nécessiterait des bibliothèques
-    supplémentaires comme pytube ou youtube-dl.
+    Télécharge une vidéo YouTube
     
     Args:
         video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
+        output_path: Chemin de sortie pour la vidéo téléchargée. Si None, un répertoire temporaire est utilisé.
         
     Returns:
         Chemin du fichier téléchargé ou None en cas d'erreur
     """
-    logger.warning("La fonction download_youtube_video est appelée mais n'est pas implémentée")
-    logger.warning("Pour télécharger des vidéos, installez pytube ou youtube-dl et implémentez cette fonction")
-    
-    # Retourner None pour indiquer que le téléchargement a échoué
-    return None
+    if not PYTUBE_AVAILABLE:
+        logger.error("Impossible de télécharger la vidéo: pytube n'est pas installé")
+        return None
+        
+    try:
+        logger.info(f"Téléchargement de la vidéo YouTube: {video_id}")
+        
+        # Construire l'URL de la vidéo
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Créer un objet YouTube
+        yt = YouTube(video_url)
+        
+        # Obtenir le flux vidéo de la plus haute résolution
+        video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        
+        if not video_stream:
+            logger.warning(f"Aucun flux vidéo trouvé pour: {video_id}")
+            return None
+            
+        # Déterminer le chemin de sortie
+        if not output_path:
+            # Créer un répertoire temporaire
+            temp_dir = tempfile.mkdtemp()
+            # Générer un nom de fichier unique
+            filename = f"{uuid.uuid4()}.mp4"
+            output_path = os.path.join(temp_dir, filename)
+            
+        # Télécharger la vidéo
+        logger.info(f"Téléchargement de la vidéo vers: {output_path}")
+        video_path = video_stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
+        
+        logger.info(f"Vidéo téléchargée avec succès: {video_path}")
+        return video_path
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None
 
