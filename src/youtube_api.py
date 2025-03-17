@@ -7,6 +7,9 @@ import logging
 import tempfile
 import shutil
 import uuid
+import time
+import io
+from urllib.parse import parse_qs, urlparse
 
 # Configuration du logger
 from src.utils.logger import get_logger
@@ -15,6 +18,7 @@ logger = get_logger(__name__)
 # Importer pytube pour le téléchargement de vidéos
 try:
     from pytube import YouTube
+    from pytube.exceptions import PytubeError
     PYTUBE_AVAILABLE = True
 except ImportError:
     logger.warning("La bibliothèque pytube n'est pas installée. Le téléchargement de vidéos ne sera pas disponible.")
@@ -308,9 +312,110 @@ def search_youtube(query, max_results=5):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
+def _get_direct_url(video_id):
+    """
+    Tente d'obtenir une URL directe pour une vidéo YouTube
+    
+    Cette fonction est une méthode de secours qui tente d'obtenir une URL directe
+    pour une vidéo YouTube en utilisant pytube.
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        
+    Returns:
+        URL directe ou None en cas d'erreur
+    """
+    if not PYTUBE_AVAILABLE:
+        return None
+        
+    try:
+        logger.info(f"Tentative d'obtention d'une URL directe pour la vidéo: {video_id}")
+        
+        # Construire l'URL de la vidéo
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Créer un objet YouTube
+        yt = YouTube(video_url)
+        
+        # Obtenir le flux vidéo de la plus basse résolution pour éviter les problèmes de taille
+        video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').first()
+        
+        if not video_stream:
+            logger.warning(f"Aucun flux vidéo trouvé pour: {video_id}")
+            return None
+            
+        # Obtenir l'URL directe
+        direct_url = video_stream.url
+        logger.info(f"URL directe obtenue: {direct_url}")
+        return direct_url
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de l'obtention de l'URL directe: {str(e)}")
+        return None
+
+def _download_with_requests(url, output_path):
+    """
+    Télécharge un fichier à partir d'une URL en utilisant requests
+    
+    Args:
+        url: URL du fichier à télécharger
+        output_path: Chemin où enregistrer le fichier
+        
+    Returns:
+        True si le téléchargement a réussi, False sinon
+    """
+    try:
+        logger.info(f"Téléchargement du fichier depuis: {url}")
+        logger.info(f"Vers: {output_path}")
+        
+        # Vérifier si le répertoire de destination existe
+        output_dir = os.path.dirname(output_path)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            logger.info(f"Répertoire créé: {output_dir}")
+        
+        # Télécharger le fichier
+        response = requests.get(url, stream=True, timeout=60)
+        response.raise_for_status()
+        
+        # Vérifier les permissions d'écriture
+        try:
+            with open(output_path, 'wb') as f:
+                f.write(b'test')
+            os.remove(output_path)
+            logger.info("Test d'écriture réussi")
+        except Exception as e:
+            logger.error(f"Erreur lors du test d'écriture: {str(e)}")
+            # Essayer un autre répertoire
+            output_path = os.path.join('/tmp', os.path.basename(output_path))
+            logger.info(f"Nouvel emplacement de sortie: {output_path}")
+        
+        # Télécharger le fichier par morceaux pour éviter les problèmes de mémoire
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Vérifier que le fichier a été téléchargé
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info(f"Fichier téléchargé avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
+            return True
+        else:
+            logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement avec requests: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
+
 def download_youtube_video(video_id, output_path=None):
     """
     Télécharge une vidéo YouTube
+    
+    Cette fonction tente de télécharger une vidéo YouTube en utilisant plusieurs méthodes:
+    1. Utiliser pytube pour télécharger la vidéo directement
+    2. Obtenir une URL directe avec pytube et télécharger avec requests
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -319,43 +424,81 @@ def download_youtube_video(video_id, output_path=None):
     Returns:
         Chemin du fichier téléchargé ou None en cas d'erreur
     """
-    if not PYTUBE_AVAILABLE:
-        logger.error("Impossible de télécharger la vidéo: pytube n'est pas installé")
-        return None
-        
-    try:
-        logger.info(f"Téléchargement de la vidéo YouTube: {video_id}")
-        
-        # Construire l'URL de la vidéo
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Créer un objet YouTube
-        yt = YouTube(video_url)
-        
-        # Obtenir le flux vidéo de la plus haute résolution
-        video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-        
-        if not video_stream:
-            logger.warning(f"Aucun flux vidéo trouvé pour: {video_id}")
-            return None
-            
-        # Déterminer le chemin de sortie
-        if not output_path:
-            # Créer un répertoire temporaire
-            temp_dir = tempfile.mkdtemp()
+    logger.info(f"Début du téléchargement de la vidéo YouTube: {video_id}")
+    logger.info(f"Chemin de sortie spécifié: {output_path}")
+    
+    # Vérifier l'environnement
+    logger.info(f"Répertoire courant: {os.getcwd()}")
+    logger.info(f"Contenu du répertoire courant: {os.listdir('.')}")
+    logger.info(f"Variables d'environnement: {os.environ}")
+    logger.info(f"Répertoire temporaire: {tempfile.gettempdir()}")
+    logger.info(f"Contenu du répertoire temporaire: {os.listdir(tempfile.gettempdir())}")
+    
+    # Déterminer le chemin de sortie
+    if not output_path:
+        try:
+            # Essayer d'utiliser /tmp qui est généralement accessible en écriture
+            temp_dir = '/tmp'
+            if not os.path.exists(temp_dir):
+                temp_dir = tempfile.gettempdir()
+                
             # Générer un nom de fichier unique
-            filename = f"{uuid.uuid4()}.mp4"
+            filename = f"youtube_{video_id}_{uuid.uuid4().hex[:8]}.mp4"
             output_path = os.path.join(temp_dir, filename)
+            logger.info(f"Chemin de sortie généré: {output_path}")
+        except Exception as e:
+            logger.error(f"Erreur lors de la génération du chemin de sortie: {str(e)}")
+            return None
+    
+    # Méthode 1: Utiliser pytube directement
+    if PYTUBE_AVAILABLE:
+        try:
+            logger.info("Tentative de téléchargement avec pytube")
             
-        # Télécharger la vidéo
-        logger.info(f"Téléchargement de la vidéo vers: {output_path}")
-        video_path = video_stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
+            # Construire l'URL de la vidéo
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Créer un objet YouTube
+            yt = YouTube(video_url)
+            
+            # Obtenir le flux vidéo de la plus basse résolution pour éviter les problèmes de taille
+            video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').first()
+            
+            if not video_stream:
+                logger.warning(f"Aucun flux vidéo trouvé pour: {video_id}")
+            else:
+                # Télécharger la vidéo
+                logger.info(f"Téléchargement de la vidéo vers: {output_path}")
+                video_path = video_stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
+                
+                # Vérifier que le fichier a été téléchargé
+                if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                    logger.info(f"Vidéo téléchargée avec succès: {video_path} ({os.path.getsize(video_path)} octets)")
+                    return video_path
+                else:
+                    logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {video_path}")
+        except Exception as e:
+            logger.error(f"Erreur lors du téléchargement avec pytube: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+    else:
+        logger.warning("pytube n'est pas disponible, passage à la méthode alternative")
+    
+    # Méthode 2: Obtenir une URL directe et télécharger avec requests
+    try:
+        logger.info("Tentative de téléchargement avec URL directe et requests")
         
-        logger.info(f"Vidéo téléchargée avec succès: {video_path}")
-        return video_path
+        # Obtenir une URL directe
+        direct_url = _get_direct_url(video_id)
         
+        if direct_url:
+            # Télécharger la vidéo avec requests
+            if _download_with_requests(direct_url, output_path):
+                return output_path
     except Exception as e:
-        logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
+        logger.error(f"Erreur lors du téléchargement avec URL directe: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        return None
+    
+    # Si toutes les méthodes ont échoué, retourner None
+    logger.error("Toutes les méthodes de téléchargement ont échoué")
+    return None
 
