@@ -8,3 +8,4 @@ pytube>=12.1.0
 requests-toolbelt>=0.10.1
 gunicorn>=20.1.0
 cloudinary>=1.33.0
+pytube==15.0.0
