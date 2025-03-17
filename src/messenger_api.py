@@ -117,59 +117,29 @@ def send_youtube_results(recipient_id, videos):
     call_send_api(message_data)
 
 def handle_watch_video(recipient_id, video_id, title):
-    """
-    Télécharge et envoie la vidéo YouTube
-    """
     try:
-        # Vérifier si la vidéo existe déjà dans la base de données
-        db = get_database()
-        existing_video = Video.find_by_video_id(video_id)
-        
-        if existing_video and existing_video.get('cloudinary_url'):
-            logger.info(f"Vidéo trouvée dans la base de données: {video_id}")
-            send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-            send_video_message(recipient_id, existing_video.get('cloudinary_url'))
-            return
-        
-        # Informer l'utilisateur que le téléchargement est en cours
-        send_text_message(recipient_id, "Téléchargement de la vidéo en cours... Cela peut prendre quelques instants.")
-        
         # Télécharger la vidéo
-        with tempfile.TemporaryDirectory() as temp_dir:
-            try:
-                video_path = download_youtube_video(video_id, temp_dir)
-                
-                if not video_path or not os.path.exists(video_path):
-                    raise Exception("Échec du téléchargement de la vidéo")
-                
-                # Télécharger la vidéo sur Cloudinary
-                upload_result = upload_file(video_path, f"youtube_{video_id}", "video")
-                cloudinary_url = upload_result.get('secure_url')
-                
-                if not cloudinary_url:
-                    raise Exception("Échec du téléchargement sur Cloudinary")
-                
-                # Sauvegarder dans la base de données
-                video = Video(
-                    video_id=video_id,
-                    title=title,
-                    cloudinary_url=cloudinary_url,
-                    thumbnail=f"https://img.youtube.com/vi/{video_id}/default.jpg"
-                )
-                video.save()
-                
-                # Envoyer la vidéo
-                send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-                send_video_message(recipient_id, cloudinary_url)
-                
-            except Exception as e:
-                logger.error(f"Erreur lors du téléchargement/envoi de la vidéo: {str(e)}")
-                # Envoyer le lien YouTube comme solution de secours
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-                send_text_message(recipient_id, f"Désolé, je n'ai pas pu télécharger la vidéo. Voici le lien YouTube : {video_url}")
+        video_path = download_youtube_video(video_id)
+        if not video_path:
+            raise Exception("Échec du téléchargement")
+            
+        # Télécharger sur S3
+        s3_client = boto3.client('s3')
+        s3_key = f"videos/{video_id}.mp4"
+        s3_client.upload_file(video_path, 'your-bucket-name', s3_key)
+        
+        # Générer une URL signée temporaire
+        url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': 'your-bucket-name', 'Key': s3_key},
+            ExpiresIn=3600
+        )
+        
+        # Envoyer la vidéo
+        send_video_message(recipient_id, url)
     except Exception as e:
-        logger.error(f"Erreur lors du traitement de la vidéo: {str(e)}")
-        send_text_message(recipient_id, "Désolé, je n'ai pas pu traiter cette vidéo. Veuillez réessayer plus tard.")
+        # Fallback au lien YouTube
+        send_text_message(recipient_id, f"Voici le lien: https://youtube.com/watch?v={video_id}")
 
 def send_video_message(recipient_id, video_url):
     """
