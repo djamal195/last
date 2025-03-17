@@ -3,13 +3,13 @@ import json
 import requests
 import traceback
 import re
+import time
+import random
 from typing import List, Dict, Optional, Any
 import logging
 import tempfile
 import shutil
 import uuid
-import time
-import io
 from urllib.parse import parse_qs, urlparse
 
 # Configuration du logger
@@ -28,6 +28,11 @@ except ImportError:
 # Expression régulière pour valider les ID de vidéos YouTube
 YOUTUBE_VIDEO_ID_REGEX = re.compile(r'^[0-9A-Za-z_-]{11}$')
 
+# Configuration du rate limiting
+MAX_RETRIES = 3
+INITIAL_BACKOFF = 2  # secondes
+MAX_BACKOFF = 60  # secondes
+
 class YouTubeAPI:
     """
     Classe pour interagir avec l'API YouTube
@@ -42,6 +47,77 @@ class YouTubeAPI:
             logger.error("Clé API YouTube manquante dans les variables d'environnement")
         
         self.base_url = "https://www.googleapis.com/youtube/v3"
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # secondes entre les requêtes
+    
+    def _rate_limit_request(self):
+        """
+        Applique une limitation de débit pour éviter les erreurs 429
+        """
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        
+        if time_since_last_request < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last_request
+            logger.info(f"Rate limiting: attente de {sleep_time:.2f} secondes")
+            time.sleep(sleep_time)
+            
+        self.last_request_time = time.time()
+    
+    def _make_request_with_retry(self, url, params=None, method='get'):
+        """
+        Effectue une requête HTTP avec retry et backoff exponentiel
+        
+        Args:
+            url: URL de la requête
+            params: Paramètres de la requête
+            method: Méthode HTTP (get, post, etc.)
+            
+        Returns:
+            Réponse de la requête ou None en cas d'erreur
+        """
+        retry_count = 0
+        backoff = INITIAL_BACKOFF
+        
+        while retry_count <= MAX_RETRIES:
+            try:
+                # Appliquer la limitation de débit
+                self._rate_limit_request()
+                
+                # Effectuer la requête
+                if method.lower() == 'get':
+                    response = requests.get(url, params=params, timeout=30)
+                else:
+                    response = requests.post(url, json=params, timeout=30)
+                
+                # Vérifier si la requête a réussi
+                response.raise_for_status()
+                return response
+                
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 429:
+                    retry_count += 1
+                    
+                    if retry_count > MAX_RETRIES:
+                        logger.error(f"Nombre maximum de tentatives atteint après erreur 429")
+                        raise
+                        
+                    # Calculer le temps d'attente avec jitter
+                    jitter = random.uniform(0, 0.1 * backoff)
+                    wait_time = backoff + jitter
+                    
+                    logger.warning(f"Erreur 429 (Too Many Requests). Attente de {wait_time:.2f} secondes avant nouvelle tentative ({retry_count}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                    
+                    # Augmenter le backoff pour la prochaine tentative
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+                else:
+                    # Autres erreurs HTTP
+                    logger.error(f"Erreur HTTP {e.response.status_code}: {str(e)}")
+                    raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Erreur de requête: {str(e)}")
+                raise
     
     def search_videos(self, query: str, max_results: int = 5) -> Optional[List[Dict[str, Any]]]:
         """
@@ -71,9 +147,12 @@ class YouTubeAPI:
                 "key": self.api_key
             }
             
-            # Effectuer la requête
-            response = requests.get(search_url, params=params)
-            response.raise_for_status()
+            # Effectuer la requête avec retry
+            try:
+                response = self._make_request_with_retry(search_url, params=params)
+            except Exception as e:
+                logger.error(f"Erreur lors de la requête de recherche: {str(e)}")
+                return None
             
             # Analyser la réponse
             data = response.json()
@@ -201,9 +280,12 @@ class YouTubeAPI:
                 "key": self.api_key
             }
             
-            # Effectuer la requête
-            response = requests.get(video_url, params=params)
-            response.raise_for_status()
+            # Effectuer la requête avec retry
+            try:
+                response = self._make_request_with_retry(video_url, params=params)
+            except Exception as e:
+                logger.error(f"Erreur lors de la requête de détails: {str(e)}")
+                return None
             
             # Analyser la réponse
             data = response.json()
@@ -318,6 +400,45 @@ def _is_valid_youtube_id(video_id):
     # contenant des lettres, des chiffres, des tirets et des underscores
     return bool(YOUTUBE_VIDEO_ID_REGEX.match(video_id))
 
+class RateLimitedYouTube:
+    """
+    Classe pour interagir avec YouTube avec limitation de débit
+    """
+    
+    def __init__(self):
+        self.last_request_time = 0
+        self.min_request_interval = 2.0  # secondes entre les requêtes
+    
+    def _rate_limit(self):
+        """
+        Applique une limitation de débit pour éviter les erreurs 429
+        """
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        
+        if time_since_last_request < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last_request
+            logger.info(f"Rate limiting pytube: attente de {sleep_time:.2f} secondes")
+            time.sleep(sleep_time)
+            
+        self.last_request_time = time.time()
+    
+    def get_youtube(self, video_url):
+        """
+        Crée un objet YouTube avec limitation de débit
+        
+        Args:
+            video_url: URL de la vidéo YouTube
+            
+        Returns:
+            Objet YouTube
+        """
+        self._rate_limit()
+        return YouTube(video_url)
+
+# Créer une instance de RateLimitedYouTube
+rate_limited_youtube = RateLimitedYouTube()
+
 def _get_direct_url(video_id):
     """
     Tente d'obtenir une URL directe pour une vidéo YouTube
@@ -345,8 +466,8 @@ def _get_direct_url(video_id):
         # Construire l'URL de la vidéo
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         
-        # Créer un objet YouTube
-        yt = YouTube(video_url)
+        # Créer un objet YouTube avec limitation de débit
+        yt = rate_limited_youtube.get_youtube(video_url)
         
         # Obtenir le flux vidéo de la plus basse résolution pour éviter les problèmes de taille
         video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').first()
@@ -476,8 +597,8 @@ def download_youtube_video(video_id, output_path=None):
             # Construire l'URL de la vidéo
             video_url = f"https://www.youtube.com/watch?v={video_id}"
             
-            # Créer un objet YouTube
-            yt = YouTube(video_url)
+            # Créer un objet YouTube avec limitation de débit
+            yt = rate_limited_youtube.get_youtube(video_url)
             
             # Obtenir le flux vidéo de la plus basse résolution pour éviter les problèmes de taille
             video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').first()
@@ -501,12 +622,20 @@ def download_youtube_video(video_id, output_path=None):
         except Exception as e:
             logger.error(f"Erreur lors du téléchargement avec pytube: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
+            
+            # Si l'erreur est due à une limitation de débit, attendre plus longtemps
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                logger.warning("Erreur 429 détectée, attente de 10 secondes avant de continuer")
+                time.sleep(10)
     else:
         logger.warning("pytube n'est pas disponible, passage à la méthode alternative")
     
     # Méthode 2: Obtenir une URL directe et télécharger avec requests
     try:
         logger.info("Tentative de téléchargement avec URL directe et requests")
+        
+        # Attendre un peu avant d'essayer la méthode alternative
+        time.sleep(2)
         
         # Obtenir une URL directe
         direct_url = _get_direct_url(video_id)
@@ -521,5 +650,8 @@ def download_youtube_video(video_id, output_path=None):
     
     # Si toutes les méthodes ont échoué, retourner None
     logger.error("Toutes les méthodes de téléchargement ont échoué")
+    
+    # Retourner un message d'erreur plus informatif pour l'utilisateur
+    logger.info("Suggestion: YouTube limite le nombre de téléchargements. Essayez plus tard ou utilisez le lien direct.")
     return None
 
