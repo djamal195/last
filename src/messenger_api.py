@@ -1,527 +1,250 @@
-import os
 import json
 import requests
-import traceback
-import logging
 import tempfile
-import uuid
-import re
-from typing import Dict, Any, Optional, List
-
-# Configuration du logger
+import os
+from src.config import MESSENGER_PAGE_ACCESS_TOKEN
+from src.mistral_api import generate_mistral_response
+from src.youtube_api import search_youtube, download_youtube_video
+from src.database import connect_to_database, get_database
+from src.models.video import Video
+from src.cloudinary_service import upload_file
 from src.utils.logger import get_logger
+
 logger = get_logger(__name__)
 
-# Importer les fonctions YouTube
-from src.youtube_api import search_youtube, download_youtube_video
+# Dictionnaire pour stocker l'état des utilisateurs
+user_states = {}
 
-# URL de l'API Messenger
-MESSENGER_API_URL = "https://graph.facebook.com/v18.0/me/messages"
-
-# Regex pour détecter les URLs YouTube
-YOUTUBE_URL_REGEX = re.compile(r'https?://(www\.)?(youtube\.com|youtu\.be)/.+')
-
-def send_message(recipient_id: str, message_text: str) -> bool:
+def handle_message(sender_id, received_message):
     """
-    Envoie un message texte à un utilisateur via l'API Messenger
+    Gère les messages reçus des utilisateurs
+    """
+    logger.info(f"Début de handle_message pour sender_id: {sender_id}")
+    logger.info(f"Message reçu: {json.dumps(received_message)}")
     
-    Args:
-        recipient_id: ID du destinataire
-        message_text: Texte du message à envoyer
-        
-    Returns:
-        True si le message a été envoyé avec succès, False sinon
-    """
     try:
-        logger.info(f"Envoi d'un message à {recipient_id}: {message_text[:50]}...")
-        
-        # Vérifier si le token d'accès est disponible
-        access_token = os.environ.get('MESSENGER_ACCESS_TOKEN')
-        if not access_token:
-            logger.error("Token d'accès Messenger manquant")
-            # Pour le développement, simuler un envoi réussi même sans token
-            return True
-        
-        # Construire le payload du message
-        message_data = {
-            "recipient": {
-                "id": recipient_id
-            },
-            "message": {
-                "text": message_text
-            }
-        }
-        
-        # Paramètres de la requête
-        params = {
-            "access_token": access_token
-        }
-        
-        # Envoyer la requête à l'API Messenger
-        response = requests.post(
-            MESSENGER_API_URL,
-            params=params,
-            json=message_data
-        )
-        
-        # Vérifier la réponse
-        response.raise_for_status()
-        result = response.json()
-        
-        if 'message_id' in result:
-            logger.info(f"Message envoyé avec succès, ID: {result['message_id']}")
-            return True
+        if 'text' in received_message:
+            text = received_message['text'].lower()
+            
+            if text == '/yt':
+                user_states[sender_id] = 'youtube'
+                send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
+            elif text == 'yt/':
+                user_states[sender_id] = 'mistral'
+                send_text_message(sender_id, "Mode Mistral réactivé. Comment puis-je vous aider ?")
+            elif sender_id in user_states and user_states[sender_id] == 'youtube':
+                logger.info(f"Recherche YouTube pour: {received_message['text']}")
+                try:
+                    videos = search_youtube(received_message['text'])
+                    logger.info(f"Résultats de la recherche YouTube: {json.dumps(videos)}")
+                    send_youtube_results(sender_id, videos)
+                except Exception as e:
+                    logger.error(f"Erreur lors de la recherche YouTube: {str(e)}")
+                    send_text_message(sender_id, "Désolé, je n'ai pas pu effectuer la recherche YouTube. Veuillez réessayer plus tard.")
+            else:
+                logger.info("Génération de la réponse Mistral...")
+                response = generate_mistral_response(received_message['text'])
+                logger.info(f"Réponse Mistral générée: {response}")
+                send_text_message(sender_id, response)
+            
+            logger.info("Message envoyé avec succès")
+        elif 'postback' in received_message:
+            logger.info(f"Traitement du postback: {json.dumps(received_message['postback'])}")
+            try:
+                payload = json.loads(received_message['postback']['payload'])
+                logger.info(f"Payload du postback: {json.dumps(payload)}")
+                
+                if payload.get('action') == 'watch_video':
+                    logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
+                    handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
+                else:
+                    logger.info(f"Action de postback non reconnue: {payload.get('action')}")
+            except Exception as e:
+                logger.error(f"Erreur lors du traitement du postback: {str(e)}")
+                send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre demande. Veuillez réessayer plus tard.")
         else:
-            logger.warning(f"Message envoyé mais pas d'ID retourné: {result}")
-            return True
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur lors de l'envoi du message: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Erreur inattendue lors de l'envoi du message: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def send_image(recipient_id: str, image_url: str) -> bool:
-    """
-    Envoie une image à un utilisateur via l'API Messenger
-    
-    Args:
-        recipient_id: ID du destinataire
-        image_url: URL de l'image à envoyer
-        
-    Returns:
-        True si l'image a été envoyée avec succès, False sinon
-    """
-    try:
-        logger.info(f"Envoi d'une image à {recipient_id}: {image_url}")
-        
-        # Vérifier si le token d'accès est disponible
-        access_token = os.environ.get('MESSENGER_ACCESS_TOKEN')
-        if not access_token:
-            logger.error("Token d'accès Messenger manquant")
-            # Pour le développement, simuler un envoi réussi même sans token
-            return True
-        
-        # Construire le payload du message
-        message_data = {
-            "recipient": {
-                "id": recipient_id
-            },
-            "message": {
-                "attachment": {
-                    "type": "image",
-                    "payload": {
-                        "url": image_url,
-                        "is_reusable": True
-                    }
-                }
-            }
-        }
-        
-        # Paramètres de la requête
-        params = {
-            "access_token": access_token
-        }
-        
-        # Envoyer la requête à l'API Messenger
-        response = requests.post(
-            MESSENGER_API_URL,
-            params=params,
-            json=message_data
-        )
-        
-        # Vérifier la réponse
-        response.raise_for_status()
-        result = response.json()
-        
-        if 'message_id' in result:
-            logger.info(f"Image envoyée avec succès, ID: {result['message_id']}")
-            return True
-        else:
-            logger.warning(f"Image envoyée mais pas d'ID retourné: {result}")
-            return True
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur lors de l'envoi de l'image: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Erreur inattendue lors de l'envoi de l'image: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def send_video(recipient_id: str, video_url: str) -> bool:
-    """
-    Envoie une vidéo à un utilisateur via l'API Messenger
-    
-    Args:
-        recipient_id: ID du destinataire
-        video_url: URL de la vidéo à envoyer
-        
-    Returns:
-        True si la vidéo a été envoyée avec succès, False sinon
-    """
-    try:
-        logger.info(f"Envoi d'une vidéo à {recipient_id}: {video_url}")
-        
-        # Vérifier si le token d'accès est disponible
-        access_token = os.environ.get('MESSENGER_ACCESS_TOKEN')
-        if not access_token:
-            logger.error("Token d'accès Messenger manquant")
-            # Pour le développement, simuler un envoi réussi même sans token
-            return True
-        
-        # Construire le payload du message
-        message_data = {
-            "recipient": {
-                "id": recipient_id
-            },
-            "message": {
-                "attachment": {
-                    "type": "video",
-                    "payload": {
-                        "url": video_url,
-                        "is_reusable": True
-                    }
-                }
-            }
-        }
-        
-        # Paramètres de la requête
-        params = {
-            "access_token": access_token
-        }
-        
-        # Envoyer la requête à l'API Messenger
-        response = requests.post(
-            MESSENGER_API_URL,
-            params=params,
-            json=message_data
-        )
-        
-        # Vérifier la réponse
-        response.raise_for_status()
-        result = response.json()
-        
-        if 'message_id' in result:
-            logger.info(f"Vidéo envoyée avec succès, ID: {result['message_id']}")
-            return True
-        else:
-            logger.warning(f"Vidéo envoyée mais pas d'ID retourné: {result}")
-            return True
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur lors de l'envoi de la vidéo: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Erreur inattendue lors de l'envoi de la vidéo: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def send_file(recipient_id: str, file_url: str, file_type: str = "file") -> bool:
-    """
-    Envoie un fichier à un utilisateur via l'API Messenger
-    
-    Args:
-        recipient_id: ID du destinataire
-        file_url: URL du fichier à envoyer
-        file_type: Type de fichier (file, audio, video, image)
-        
-    Returns:
-        True si le fichier a été envoyé avec succès, False sinon
-    """
-    try:
-        logger.info(f"Envoi d'un fichier ({file_type}) à {recipient_id}: {file_url}")
-        
-        # Vérifier si le token d'accès est disponible
-        access_token = os.environ.get('MESSENGER_ACCESS_TOKEN')
-        if not access_token:
-            logger.error("Token d'accès Messenger manquant")
-            # Pour le développement, simuler un envoi réussi même sans token
-            return True
-        
-        # Valider le type de fichier
-        valid_types = ["file", "audio", "video", "image"]
-        if file_type not in valid_types:
-            logger.warning(f"Type de fichier non valide: {file_type}. Utilisation du type 'file' par défaut.")
-            file_type = "file"
-        
-        # Construire le payload du message
-        message_data = {
-            "recipient": {
-                "id": recipient_id
-            },
-            "message": {
-                "attachment": {
-                    "type": file_type,
-                    "payload": {
-                        "url": file_url,
-                        "is_reusable": True
-                    }
-                }
-            }
-        }
-        
-        # Paramètres de la requête
-        params = {
-            "access_token": access_token
-        }
-        
-        # Envoyer la requête à l'API Messenger
-        response = requests.post(
-            MESSENGER_API_URL,
-            params=params,
-            json=message_data
-        )
-        
-        # Vérifier la réponse
-        response.raise_for_status()
-        result = response.json()
-        
-        if 'message_id' in result:
-            logger.info(f"Fichier envoyé avec succès, ID: {result['message_id']}")
-            return True
-        else:
-            logger.warning(f"Fichier envoyé mais pas d'ID retourné: {result}")
-            return True
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur lors de l'envoi du fichier: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Erreur inattendue lors de l'envoi du fichier: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def send_quick_replies(recipient_id: str, message_text: str, quick_replies: List[Dict[str, str]]) -> bool:
-    """
-    Envoie un message avec des réponses rapides à un utilisateur via l'API Messenger
-    
-    Args:
-        recipient_id: ID du destinataire
-        message_text: Texte du message à envoyer
-        quick_replies: Liste de réponses rapides (doit contenir 'content_type', 'title', 'payload')
-        
-    Returns:
-        True si le message a été envoyé avec succès, False sinon
-    """
-    try:
-        logger.info(f"Envoi d'un message avec réponses rapides à {recipient_id}")
-        
-        # Vérifier si le token d'accès est disponible
-        access_token = os.environ.get('MESSENGER_ACCESS_TOKEN')
-        if not access_token:
-            logger.error("Token d'accès Messenger manquant")
-            # Pour le développement, simuler un envoi réussi même sans token
-            return True
-        
-        # Construire le payload du message
-        message_data = {
-            "recipient": {
-                "id": recipient_id
-            },
-            "message": {
-                "text": message_text,
-                "quick_replies": quick_replies
-            }
-        }
-        
-        # Paramètres de la requête
-        params = {
-            "access_token": access_token
-        }
-        
-        # Envoyer la requête à l'API Messenger
-        response = requests.post(
-            MESSENGER_API_URL,
-            params=params,
-            json=message_data
-        )
-        
-        # Vérifier la réponse
-        response.raise_for_status()
-        result = response.json()
-        
-        if 'message_id' in result:
-            logger.info(f"Message avec réponses rapides envoyé avec succès, ID: {result['message_id']}")
-            return True
-        else:
-            logger.warning(f"Message avec réponses rapides envoyé mais pas d'ID retourné: {result}")
-            return True
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur lors de l'envoi du message avec réponses rapides: {str(e)}")
-        return False
-    except Exception as e:
-        logger.error(f"Erreur inattendue lors de l'envoi du message avec réponses rapides: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def send_youtube_video(recipient_id: str, video_id: str) -> bool:
-    """
-    Télécharge et envoie une vidéo YouTube à un utilisateur
-    
-    Args:
-        recipient_id: ID du destinataire
-        video_id: ID de la vidéo YouTube
-        
-    Returns:
-        True si la vidéo a été envoyée avec succès, False sinon
-    """
-    try:
-        logger.info(f"Préparation de l'envoi de la vidéo YouTube {video_id} à {recipient_id}")
-        
-        # Télécharger la vidéo
-        video_path_or_url = download_youtube_video(video_id)
-        
-        if not video_path_or_url:
-            logger.error(f"Échec du téléchargement de la vidéo: {video_id}")
-            send_message(recipient_id, "Désolé, je n'ai pas pu télécharger cette vidéo. Veuillez réessayer plus tard.")
-            return False
-        
-        # Vérifier si c'est une URL YouTube (solution de secours en cas de limitation de débit)
-        if YOUTUBE_URL_REGEX.match(video_path_or_url):
-            logger.info(f"Envoi du lien YouTube au lieu de la vidéo: {video_path_or_url}")
-            send_message(recipient_id, f"Voici la vidéo que vous avez demandée: {video_path_or_url}")
-            return True
-        
-        # Si c'est un chemin de fichier, envoyer la vidéo
-        logger.info(f"Vidéo téléchargée avec succès: {video_path_or_url}")
-        
-        # Vérifier si le fichier existe
-        if not os.path.exists(video_path_or_url):
-            logger.error(f"Le fichier vidéo n'existe pas: {video_path_or_url}")
-            send_message(recipient_id, "Désolé, je n'ai pas pu télécharger cette vidéo. Veuillez réessayer plus tard.")
-            return False
-        
-        # Envoyer la vidéo
-        # Note: Cette partie dépend de la façon dont vous hébergez et servez les fichiers
-        # Vous devrez peut-être télécharger la vidéo sur un service de stockage cloud d'abord
-        
-        # Pour cet exemple, nous supposons que vous avez une URL publique pour le fichier
-        video_url = f"https://votre-domaine.com/videos/{os.path.basename(video_path_or_url)}"
-        
-        # Envoyer la vidéo
-        return send_video(recipient_id, video_url)
-            
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement/envoi de la vidéo: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        send_message(recipient_id, "Désolé, je n'ai pas pu télécharger cette vidéo. Veuillez réessayer plus tard.")
-        return False
-
-def handle_message(sender_id: str, message_data: Any) -> bool:
-    """
-    Traite un message reçu d'un utilisateur
-    
-    Args:
-        sender_id: ID de l'expéditeur
-        message_data: Données du message reçu (peut être un dictionnaire ou une chaîne)
-        
-    Returns:
-        True si le message a été traité avec succès, False sinon
-    """
-    try:
-        logger.info(f"Traitement du message de {sender_id}: {message_data}")
-        
-        # Extraire le texte du message
-        message_text = ""
-        if isinstance(message_data, dict) and 'text' in message_data:
-            message_text = message_data['text']
-        elif isinstance(message_data, str):
-            message_text = message_data
-        else:
-            logger.warning(f"Format de message non reconnu: {type(message_data)}")
-            send_message(sender_id, "Je n'ai pas compris votre message. Veuillez envoyer un texte.")
-            return True
-        
-        # Vérifier si le message est vide
-        if not message_text or message_text.strip() == "":
-            logger.warning(f"Message vide reçu de {sender_id}")
-            send_message(sender_id, "Je n'ai pas compris votre message. Veuillez envoyer un texte.")
-            return True
-        
-        # Convertir en minuscules pour faciliter la comparaison
-        message_lower = message_text.lower()
-        
-        # Commande d'aide
-        if message_lower == "aide" or message_lower == "help":
-            send_message(sender_id, "Voici les commandes disponibles:\n"
-                                   "- 'recherche [terme]': Recherche des vidéos YouTube\n"
-                                   "- 'video [id]': Télécharge et envoie une vidéo YouTube\n"
-                                   "- 'aide': Affiche ce message d'aide")
-            return True
-        
-        # Commande de recherche
-        if message_lower.startswith("recherche ") or message_lower.startswith("search "):
-            # Extraire le terme de recherche
-            search_term = message_text.split(" ", 1)[1].strip()
-            
-            if not search_term:
-                send_message(sender_id, "Veuillez spécifier un terme de recherche. Exemple: 'recherche chat mignon'")
-                return True
-            
-            # Rechercher des vidéos
-            videos = search_youtube(search_term)
-            
-            if not videos:
-                send_message(sender_id, f"Aucune vidéo trouvée pour '{search_term}'")
-                return True
-            
-            # Construire le message de résultats
-            result_message = f"Résultats pour '{search_term}':\n\n"
-            
-            for i, video in enumerate(videos[:5], 1):
-                result_message += f"{i}. {video['title']}\n"
-                result_message += f"ID: {video['videoId']}\n"
-                result_message += f"URL: {video['url']}\n\n"
-            
-            result_message += "Pour télécharger une vidéo, envoyez 'video [ID]'"
-            
-            # Envoyer les résultats
-            send_message(sender_id, result_message)
-            return True
-        
-        # Commande de téléchargement de vidéo
-        if message_lower.startswith("video ") or message_lower.startswith("vidéo "):
-            # Extraire l'ID de la vidéo
-            video_id = message_text.split(" ", 1)[1].strip()
-            
-            if not video_id:
-                send_message(sender_id, "Veuillez spécifier l'ID de la vidéo. Exemple: 'video dQw4w9WgXcQ'")
-                return True
-            
-            # Envoyer un message d'attente
-            send_message(sender_id, f"Téléchargement de la vidéo {video_id} en cours... Cela peut prendre quelques instants.")
-            
-            # Télécharger et envoyer la vidéo
-            video_path_or_url = download_youtube_video(video_id)
-            
-            if not video_path_or_url:
-                send_message(sender_id, "Désolé, je n'ai pas pu télécharger cette vidéo. Veuillez réessayer plus tard.")
-                return False
-            
-            # Vérifier si c'est une URL YouTube (solution de secours en cas de limitation de débit)
-            if YOUTUBE_URL_REGEX.match(video_path_or_url):
-                logger.info(f"Envoi du lien YouTube au lieu de la vidéo: {video_path_or_url}")
-                send_message(sender_id, f"En raison des limitations de YouTube, je ne peux pas télécharger la vidéo pour le moment. Voici le lien direct: {video_path_or_url}")
-                return True
-            
-            # Si c'est un chemin de fichier, envoyer la vidéo
-            # Note: Cette partie dépend de la façon dont vous hébergez et servez les fichiers
-            send_message(sender_id, f"Vidéo téléchargée avec succès! Voici le chemin: {video_path_or_url}")
-            # Ici, vous devriez implémenter la logique pour envoyer le fichier vidéo
-            
-            return True
-        
-        # Message par défaut
-        send_message(sender_id, "Je ne comprends pas cette commande. Envoyez 'aide' pour voir les commandes disponibles.")
-        return True
-        
+            logger.info("Message reçu sans texte")
+            send_text_message(sender_id, "Désolé, je ne peux traiter que des messages texte.")
     except Exception as e:
         logger.error(f"Erreur lors du traitement du message: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        send_message(sender_id, "Désolé, une erreur s'est produite lors du traitement de votre message. Veuillez réessayer plus tard.")
-        return False
+        error_message = "Désolé, j'ai rencontré une erreur en traitant votre message. Veuillez réessayer plus tard."
+        if "timeout" in str(e):
+            error_message = "Désolé, la génération de la réponse a pris trop de temps. Veuillez réessayer avec une question plus courte ou plus simple."
+        send_text_message(sender_id, error_message)
+    
+    logger.info("Fin de handle_message")
 
+def send_youtube_results(recipient_id, videos):
+    """
+    Envoie les résultats de recherche YouTube sous forme de carrousel
+    """
+    elements = []
+    for video in videos:
+        elements.append({
+            "title": video['title'],
+            "image_url": video['thumbnail'],
+            "buttons": [
+                {
+                    "type": "web_url",
+                    "url": f"https://www.youtube.com/watch?v={video['videoId']}",
+                    "title": "Regarder sur YouTube"
+                },
+                {
+                    "type": "postback",
+                    "title": "Télécharger et envoyer",
+                    "payload": json.dumps({
+                        "action": "watch_video",
+                        "videoId": video['videoId'],
+                        "title": video['title']
+                    })
+                }
+            ]
+        })
+    
+    message_data = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "generic",
+                    "elements": elements
+                }
+            }
+        }
+    }
+    
+    call_send_api(message_data)
+
+def handle_watch_video(recipient_id, video_id, title):
+    """
+    Télécharge et envoie la vidéo YouTube
+    """
+    try:
+        # Vérifier si la vidéo existe déjà dans la base de données
+        db = get_database()
+        existing_video = Video.find_by_video_id(video_id)
+        
+        if existing_video and existing_video.get('cloudinary_url'):
+            logger.info(f"Vidéo trouvée dans la base de données: {video_id}")
+            send_text_message(recipient_id, f"Voici votre vidéo : {title}")
+            send_video_message(recipient_id, existing_video.get('cloudinary_url'))
+            return
+        
+        # Informer l'utilisateur que le téléchargement est en cours
+        send_text_message(recipient_id, "Téléchargement de la vidéo en cours... Cela peut prendre quelques instants.")
+        
+        # Télécharger la vidéo
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                video_path = download_youtube_video(video_id, temp_dir)
+                
+                if not video_path or not os.path.exists(video_path):
+                    raise Exception("Échec du téléchargement de la vidéo")
+                
+                # Télécharger la vidéo sur Cloudinary
+                upload_result = upload_file(video_path, f"youtube_{video_id}", "video")
+                cloudinary_url = upload_result.get('secure_url')
+                
+                if not cloudinary_url:
+                    raise Exception("Échec du téléchargement sur Cloudinary")
+                
+                # Sauvegarder dans la base de données
+                video = Video(
+                    video_id=video_id,
+                    title=title,
+                    cloudinary_url=cloudinary_url,
+                    thumbnail=f"https://img.youtube.com/vi/{video_id}/default.jpg"
+                )
+                video.save()
+                
+                # Envoyer la vidéo
+                send_text_message(recipient_id, f"Voici votre vidéo : {title}")
+                send_video_message(recipient_id, cloudinary_url)
+                
+            except Exception as e:
+                logger.error(f"Erreur lors du téléchargement/envoi de la vidéo: {str(e)}")
+                # Envoyer le lien YouTube comme solution de secours
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                send_text_message(recipient_id, f"Désolé, je n'ai pas pu télécharger la vidéo. Voici le lien YouTube : {video_url}")
+    except Exception as e:
+        logger.error(f"Erreur lors du traitement de la vidéo: {str(e)}")
+        send_text_message(recipient_id, "Désolé, je n'ai pas pu traiter cette vidéo. Veuillez réessayer plus tard.")
+
+def send_video_message(recipient_id, video_url):
+    """
+    Envoie un message vidéo à l'utilisateur
+    """
+    message_data = {
+        "recipient": {
+            "id": recipient_id
+        },
+        "message": {
+            "attachment": {
+                "type": "video",
+                "payload": {
+                    "url": video_url,
+                    "is_reusable": True
+                }
+            }
+        }
+    }
+    
+    call_send_api(message_data)
+
+def send_text_message(recipient_id, message_text):
+    """
+    Envoie un message texte à l'utilisateur
+    """
+    logger.info(f"Début de send_text_message pour recipient_id: {recipient_id}")
+    logger.info(f"Message à envoyer: {message_text}")
+    
+    # Diviser le message en chunks de 2000 caractères maximum
+    chunks = [message_text[i:i+2000] for i in range(0, len(message_text), 2000)]
+    
+    for chunk in chunks:
+        message_data = {
+            "recipient": {
+                "id": recipient_id
+            },
+            "message": {
+                "text": chunk
+            }
+        }
+        
+        try:
+            call_send_api(message_data)
+        except Exception as e:
+            logger.error(f"Erreur lors de l'envoi du message: {str(e)}")
+            raise e
+    
+    logger.info("Fin de send_text_message")
+
+def call_send_api(message_data):
+    """
+    Appelle l'API Send de Facebook pour envoyer des messages
+    """
+    logger.info(f"Début de call_send_api avec message_data: {json.dumps(message_data)}")
+    url = f"https://graph.facebook.com/v13.0/me/messages?access_token={MESSENGER_PAGE_ACCESS_TOKEN}"
+    
+    try:
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json=message_data
+        )
+        
+        logger.info(f"Réponse reçue de l'API Facebook. Status: {response.status_code}")
+        
+        response_body = response.json()
+        logger.info(f"Réponse de l'API Facebook: {json.dumps(response_body)}")
+        
+        if 'error' in response_body:
+            logger.error(f"Erreur lors de l'appel à l'API Send: {response_body['error']}")
+            raise Exception(response_body['error']['message'])
+        
+        logger.info("Message envoyé avec succès")
+        return response_body
+    except Exception as e:
+        logger.error(f"Erreur lors de l'appel à l'API Facebook: {str(e)}")
+        raise e
