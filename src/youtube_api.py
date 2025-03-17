@@ -695,9 +695,6 @@ def download_youtube_video(video_id, output_path=None):
             if not video_stream:
                 logger.warning(f"Aucun flux vidéo trouvé pour: {video_id}")
             else:
-                 
-                logger.warning(f"Aucun flux vidéo trouvé pour: {video_id}")
-            else:
                 # Télécharger la vidéo
                 logger.info(f"Téléchargement de la vidéo vers: {output_path}")
                 video_path = video_stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
