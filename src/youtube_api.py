@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import traceback
+import re
 from typing import List, Dict, Optional, Any
 import logging
 import tempfile
@@ -18,11 +19,14 @@ logger = get_logger(__name__)
 # Importer pytube pour le téléchargement de vidéos
 try:
     from pytube import YouTube
-    from pytube.exceptions import PytubeError
+    from pytube.exceptions import PytubeError, RegexMatchError
     PYTUBE_AVAILABLE = True
 except ImportError:
     logger.warning("La bibliothèque pytube n'est pas installée. Le téléchargement de vidéos ne sera pas disponible.")
     PYTUBE_AVAILABLE = False
+
+# Expression régulière pour valider les ID de vidéos YouTube
+YOUTUBE_VIDEO_ID_REGEX = re.compile(r'^[0-9A-Za-z_-]{11}$')
 
 class YouTubeAPI:
     """
@@ -63,7 +67,7 @@ class YouTubeAPI:
                 "part": "snippet",
                 "q": query,
                 "maxResults": max_results,
-                "type": "video",
+                "type": "video",  # Spécifier explicitement que nous voulons uniquement des vidéos
                 "key": self.api_key
             }
             
@@ -88,51 +92,31 @@ class YouTubeAPI:
                 try:
                     logger.info(f"Traitement de l'élément {i}: {json.dumps(item, indent=2)}")
                     
-                    # Extraire l'ID de la vidéo avec vérification de sécurité
+                    # Vérifier si c'est une vidéo ou un autre type d'élément
                     if 'id' not in item:
                         logger.warning(f"Élément sans 'id': {item}")
                         continue
                     
-                    logger.info(f"Structure de l'ID: {json.dumps(item['id'], indent=2)}")
-                    
-                    video_id = None
+                    # Vérifier le type d'élément
                     if isinstance(item['id'], dict):
-                        if 'videoId' in item['id']:
-                            video_id = item['id']['videoId']
-                            logger.info(f"ID de vidéo extrait du dictionnaire: {video_id}")
-                        else:
+                        if 'kind' in item['id'] and item['id']['kind'] != 'youtube#video':
+                            logger.warning(f"Élément ignoré car ce n'est pas une vidéo: {item['id']['kind']}")
+                            continue
+                        
+                        if 'videoId' not in item['id']:
                             logger.warning(f"Clé 'videoId' manquante dans item['id']: {item['id']}")
-                            # Essayer d'autres clés possibles
-                            for key in item['id']:
-                                if isinstance(item['id'][key], str) and len(item['id'][key]) > 5:
-                                    video_id = item['id'][key]
-                                    logger.info(f"ID de vidéo extrait d'une clé alternative '{key}': {video_id}")
-                                    break
+                            continue
+                        
+                        video_id = item['id']['videoId']
                     elif isinstance(item['id'], str):
                         video_id = item['id']
-                        logger.info(f"ID de vidéo extrait directement: {video_id}")
                     else:
                         logger.warning(f"Format d'ID non reconnu: {type(item['id'])}")
                         continue
                     
-                    if not video_id:
-                        # Essayer d'extraire l'ID de l'URL si disponible
-                        if 'snippet' in item and 'thumbnails' in item['snippet']:
-                            for quality in ['high', 'medium', 'default']:
-                                if quality in item['snippet']['thumbnails'] and 'url' in item['snippet']['thumbnails'][quality]:
-                                    url = item['snippet']['thumbnails'][quality]['url']
-                                    # Les URL des miniatures YouTube contiennent souvent l'ID de la vidéo
-                                    if 'vi/' in url and '/default.jpg' in url:
-                                        parts = url.split('vi/')
-                                        if len(parts) > 1:
-                                            potential_id = parts[1].split('/')[0]
-                                            if len(potential_id) > 5:  # Les ID YouTube sont généralement plus longs
-                                                video_id = potential_id
-                                                logger.info(f"ID de vidéo extrait de l'URL de la miniature: {video_id}")
-                                                break
-                    
-                    if not video_id:
-                        logger.warning("Impossible d'extraire l'ID de la vidéo, élément ignoré")
+                    # Valider l'ID de la vidéo
+                    if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
+                        logger.warning(f"ID de vidéo invalide: {video_id}")
                         continue
                     
                     # Extraire les autres informations avec vérification
@@ -197,6 +181,11 @@ class YouTubeAPI:
         Returns:
             Détails de la vidéo ou None en cas d'erreur
         """
+        # Valider l'ID de la vidéo
+        if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
+            logger.error(f"ID de vidéo invalide: {video_id}")
+            return None
+            
         if not self.api_key:
             logger.error("Impossible d'obtenir les détails de la vidéo: clé API manquante")
             return None
@@ -312,6 +301,23 @@ def search_youtube(query, max_results=5):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
+def _is_valid_youtube_id(video_id):
+    """
+    Vérifie si un ID de vidéo YouTube est valide
+    
+    Args:
+        video_id: ID à vérifier
+        
+    Returns:
+        True si l'ID est valide, False sinon
+    """
+    if not video_id or not isinstance(video_id, str):
+        return False
+        
+    # Les ID de vidéos YouTube sont généralement des chaînes de 11 caractères
+    # contenant des lettres, des chiffres, des tirets et des underscores
+    return bool(YOUTUBE_VIDEO_ID_REGEX.match(video_id))
+
 def _get_direct_url(video_id):
     """
     Tente d'obtenir une URL directe pour une vidéo YouTube
@@ -326,6 +332,11 @@ def _get_direct_url(video_id):
         URL directe ou None en cas d'erreur
     """
     if not PYTUBE_AVAILABLE:
+        return None
+        
+    # Valider l'ID de la vidéo
+    if not _is_valid_youtube_id(video_id):
+        logger.error(f"ID de vidéo invalide: {video_id}")
         return None
         
     try:
@@ -349,6 +360,9 @@ def _get_direct_url(video_id):
         logger.info(f"URL directe obtenue: {direct_url}")
         return direct_url
         
+    except RegexMatchError as e:
+        logger.error(f"Erreur de correspondance regex lors de l'obtention de l'URL directe: {str(e)}")
+        return None
     except Exception as e:
         logger.error(f"Erreur lors de l'obtention de l'URL directe: {str(e)}")
         return None
@@ -427,10 +441,14 @@ def download_youtube_video(video_id, output_path=None):
     logger.info(f"Début du téléchargement de la vidéo YouTube: {video_id}")
     logger.info(f"Chemin de sortie spécifié: {output_path}")
     
+    # Valider l'ID de la vidéo
+    if not _is_valid_youtube_id(video_id):
+        logger.error(f"ID de vidéo invalide: {video_id}")
+        return None
+    
     # Vérifier l'environnement
     logger.info(f"Répertoire courant: {os.getcwd()}")
     logger.info(f"Contenu du répertoire courant: {os.listdir('.')}")
-    logger.info(f"Variables d'environnement: {os.environ}")
     logger.info(f"Répertoire temporaire: {tempfile.gettempdir()}")
     logger.info(f"Contenu du répertoire temporaire: {os.listdir(tempfile.gettempdir())}")
     
@@ -477,6 +495,9 @@ def download_youtube_video(video_id, output_path=None):
                     return video_path
                 else:
                     logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {video_path}")
+        except RegexMatchError as e:
+            logger.error(f"Erreur de correspondance regex lors du téléchargement avec pytube: {str(e)}")
+            logger.error("Cela peut indiquer un ID de vidéo invalide ou un problème avec l'URL YouTube")
         except Exception as e:
             logger.error(f"Erreur lors du téléchargement avec pytube: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
