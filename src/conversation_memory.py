@@ -22,7 +22,7 @@ def add_message(user_id: str, role: str, content: str) -> None:
     try:
         # Obtenir la base de données
         db = get_database()
-        if not db:
+        if db is None:
             logger.error("Impossible de se connecter à la base de données")
             return
         
@@ -76,7 +76,7 @@ def get_conversation_history(user_id: str) -> List[Dict[str, str]]:
     try:
         # Obtenir la base de données
         db = get_database()
-        if not db:
+        if db is None:
             logger.error("Impossible de se connecter à la base de données")
             return []
         
@@ -143,7 +143,7 @@ def clear_user_history(user_id: str) -> None:
     try:
         # Obtenir la base de données
         db = get_database()
-        if not db:
+        if db is None:
             logger.error("Impossible de se connecter à la base de données")
             return
         
@@ -165,7 +165,7 @@ def clear_old_histories() -> None:
     try:
         # Obtenir la base de données
         db = get_database()
-        if not db:
+        if db is None:
             logger.error("Impossible de se connecter à la base de données")
             return
         
