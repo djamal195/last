@@ -7,6 +7,8 @@ import time
 import random
 import threading
 import queue
+import signal
+import atexit
 from typing import List, Dict, Optional, Any, Tuple
 import logging
 import tempfile
@@ -45,6 +47,12 @@ download_queue = queue.Queue()
 MAX_CONCURRENT_DOWNLOADS = 2
 current_downloads = 0
 download_lock = threading.Lock()
+
+# Flag pour indiquer si le thread de téléchargement doit s'arrêter
+should_stop = False
+
+# Sauvegarde de la file d'attente pour la persistance
+QUEUE_BACKUP_FILE = os.path.join(tempfile.gettempdir(), 'youtube_queue_backup.json')
 
 def _check_rate_limit():
     """
@@ -560,27 +568,100 @@ def _download_with_requests(url, output_path):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
+def _save_queue_backup():
+    """
+    Sauvegarde la file d'attente dans un fichier
+    """
+    try:
+        # Créer une liste des éléments dans la file d'attente
+        queue_items = []
+        with download_lock:
+            # Copier les éléments de la file d'attente
+            temp_queue = list(download_queue.queue)
+            for item in temp_queue:
+                video_id, output_path, _ = item
+                queue_items.append({
+                    'video_id': video_id,
+                    'output_path': output_path
+                })
+        
+        # Sauvegarder dans un fichier
+        with open(QUEUE_BACKUP_FILE, 'w') as f:
+            json.dump(queue_items, f)
+            
+        logger.info(f"File d'attente sauvegardée: {len(queue_items)} éléments")
+    except Exception as e:
+        logger.error(f"Erreur lors de la sauvegarde de la file d'attente: {str(e)}")
+
+def _load_queue_backup():
+    """
+    Charge la file d'attente depuis un fichier
+    """
+    try:
+        if not os.path.exists(QUEUE_BACKUP_FILE):
+            logger.info("Aucune sauvegarde de file d'attente trouvée")
+            return
+            
+        # Charger depuis le fichier
+        with open(QUEUE_BACKUP_FILE, 'r') as f:
+            queue_items = json.load(f)
+            
+        # Ajouter les éléments à la file d'attente
+        for item in queue_items:
+            video_id = item.get('video_id')
+            output_path = item.get('output_path')
+            
+            if video_id and _is_valid_youtube_id(video_id):
+                # Ajouter à la file d'attente sans callback (sera géré par le système de notification)
+                download_queue.put((video_id, output_path, None))
+                
+        logger.info(f"File d'attente chargée: {len(queue_items)} éléments")
+        
+        # Supprimer le fichier de sauvegarde
+        os.remove(QUEUE_BACKUP_FILE)
+    except Exception as e:
+        logger.error(f"Erreur lors du chargement de la file d'attente: {str(e)}")
+
 def _process_download_queue():
     """
     Traite la file d'attente des téléchargements
     """
-    global current_downloads
+    global current_downloads, should_stop
     
-    while True:
+    logger.info("Démarrage du thread de traitement de la file d'attente")
+    
+    # Charger la sauvegarde de la file d'attente
+    _load_queue_backup()
+    
+    while not should_stop:
         try:
-            # Récupérer un élément de la file d'attente
-            video_id, output_path, callback = download_queue.get(block=True, timeout=1)
+            # Récupérer un élément de la file d'attente avec un timeout
+            try:
+                video_id, output_path, callback = download_queue.get(block=True, timeout=1)
+            except queue.Empty:
+                # La file d'attente est vide, attendre un peu
+                time.sleep(1)
+                continue
             
             with download_lock:
                 current_downloads += 1
             
             try:
+                logger.info(f"Traitement du téléchargement pour la vidéo: {video_id}")
+                
                 # Télécharger la vidéo
                 result = _download_video(video_id, output_path)
                 
                 # Appeler le callback avec le résultat
                 if callback:
-                    callback(result)
+                    try:
+                        callback(result)
+                    except Exception as e:
+                        logger.error(f"Erreur lors de l'appel du callback: {str(e)}")
+                else:
+                    # Si pas de callback, notifier via le système de notification
+                    logger.info(f"Téléchargement terminé pour la vidéo {video_id}: {result}")
+                    # Ici, vous pourriez implémenter un système de notification
                     
             except Exception as e:
                 logger.error(f"Erreur lors du traitement du téléchargement: {str(e)}")
@@ -588,7 +669,10 @@ def _process_download_queue():
                 
                 # Appeler le callback avec None en cas d'erreur
                 if callback:
-                    callback(None)
+                    try:
+                        callback(None)
+                    except Exception as e:
+                        logger.error(f"Erreur lors de l'appel du callback d'erreur: {str(e)}")
             
             finally:
                 # Marquer la tâche comme terminée
@@ -597,13 +681,15 @@ def _process_download_queue():
                 with download_lock:
                     current_downloads -= 1
                 
-        except queue.Empty:
-            # La file d'attente est vide, attendre un peu
-            time.sleep(1)
         except Exception as e:
             logger.error(f"Erreur dans le thread de traitement de la file d'attente: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             time.sleep(5)  # Attendre un peu avant de réessayer
+    
+    logger.info("Arrêt du thread de traitement de la file d'attente")
+    
+    # Sauvegarder la file d'attente avant de terminer
+    _save_queue_backup()
 
 def _download_video(video_id, output_path=None):
     """
@@ -774,7 +860,36 @@ def download_youtube_video(video_id, output_path=None, callback=None):
         
         return False
 
+def stop_download_thread():
+    """
+    Arrête le thread de téléchargement proprement
+    """
+    global should_stop
+    
+    logger.info("Arrêt du thread de téléchargement demandé")
+    should_stop = True
+    
+    # Attendre que le thread se termine
+    if download_thread.is_alive():
+        download_thread.join(timeout=10)
+        
+    logger.info("Thread de téléchargement arrêté")
+
+# Gestionnaire de signal pour arrêter proprement le thread
+def signal_handler(signum, frame):
+    logger.info(f"Signal reçu: {signum}")
+    stop_download_thread()
+
+# Enregistrer les gestionnaires de signal
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# Enregistrer la fonction d'arrêt pour qu'elle soit appelée à la fin du programme
+atexit.register(stop_download_thread)
+
 # Démarrer le thread de traitement de la file d'attente
-download_thread = threading.Thread(target=_process_download_queue, daemon=True)
+download_thread = threading.Thread(target=_process_download_queue)
 download_thread.start()
+
+logger.info("Module YouTube API initialisé avec système de file d'attente")
 
