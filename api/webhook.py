@@ -20,6 +20,14 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Ajouter une route pour la racine pour les vérifications de santé
+@app.route('/', methods=['GET', 'HEAD'])
+def root():
+    """
+    Endpoint racine pour les vérifications de santé
+    """
+    return Response("Service is running", status=200)
+
 @app.route('/api/webhook', methods=['GET'])
 def webhook_verification():
     """
@@ -89,7 +97,7 @@ def webhook_handler():
         logger.warning("Requête non reconnue reçue")
         return Response(status=404)
 
-@app.route('/healthz', methods=['GET'])
+@app.route('/healthz', methods=['GET', 'HEAD'])
 def health_check():
     """
     Point d'entrée pour la vérification de santé
@@ -97,8 +105,24 @@ def health_check():
     logger.info("Vérification de santé demandée")
     return Response("OK", status=200)
 
+# Modifier le gestionnaire d'erreurs pour ignorer les 404 sur les routes de surveillance
+@app.errorhandler(404)
+def handle_404(e):
+    # Vérifier si c'est une requête de surveillance
+    if request.path == '/' or request.path == '/healthz':
+        logger.info(f"Requête de surveillance reçue sur {request.path}")
+        return Response("Service is running", status=200)
+    
+    # Pour les autres 404, journaliser comme avertissement et non comme erreur
+    logger.warning(f"Route non trouvée: {request.path}")
+    return Response("Not Found", status=404)
+
 @app.errorhandler(Exception)
 def handle_error(e):
+    # Ne pas traiter les 404 comme des erreurs critiques
+    if isinstance(e, werkzeug.exceptions.NotFound):
+        return handle_404(e)
+        
     print(f"Erreur non gérée: {str(e)}")
     logger.error(f"Erreur non gérée: {str(e)}", exc_info=True)
     return Response("Quelque chose s'est mal passé!", status=500)
