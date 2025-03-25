@@ -3,6 +3,7 @@ import json
 import requests
 import traceback
 import tempfile
+import time
 from typing import Dict, Any, Optional
 from src.utils.logger import get_logger
 from src.mistral_api import generate_mistral_response
@@ -26,6 +27,9 @@ else:
 
 # Dictionnaire pour stocker l'état des utilisateurs
 user_states = {}
+
+# Dictionnaire pour stocker les téléchargements en cours
+pending_downloads = {}
 
 def handle_message(sender_id, message_data):
     """
@@ -147,6 +151,85 @@ def send_youtube_results(recipient_id, videos):
     
     call_send_api(message_data)
 
+def handle_download_callback(recipient_id, video_id, title, result):
+    """
+    Callback pour le téléchargement d'une vidéo
+    
+    Args:
+        recipient_id: ID du destinataire
+        video_id: ID de la vidéo YouTube
+        title: Titre de la vidéo
+        result: Résultat du téléchargement (chemin du fichier ou URL YouTube)
+    """
+    logger.info(f"Callback de téléchargement pour {recipient_id}, vidéo {video_id}: {result}")
+    
+    try:
+        # Supprimer le téléchargement en cours
+        if recipient_id in pending_downloads and video_id in pending_downloads[recipient_id]:
+            del pending_downloads[recipient_id][video_id]
+        
+        # Si le résultat est None, envoyer un message d'erreur
+        if result is None:
+            send_text_message(recipient_id, f"Désolé, je n'ai pas pu télécharger la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+            return
+        
+        # Si le résultat est une URL YouTube, envoyer le lien
+        if isinstance(result, str) and result.startswith("https://www.youtube.com/watch"):
+            send_text_message(recipient_id, f"En raison des limitations de YouTube, je ne peux pas télécharger la vidéo pour le moment. Voici le lien direct: {result}")
+            return
+        
+        # Si le résultat est un chemin de fichier, vérifier qu'il existe
+        if not os.path.exists(result):
+            send_text_message(recipient_id, f"Désolé, le téléchargement de la vidéo a échoué. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+            return
+        
+        logger.info(f"Vidéo téléchargée avec succès: {result}")
+        
+        # Télécharger la vidéo sur Cloudinary pour obtenir une URL publique
+        try:
+            cloudinary_result = upload_file(result, f"youtube_{video_id}", "video")
+            
+            if not cloudinary_result or not cloudinary_result.get('secure_url'):
+                raise Exception("Échec du téléchargement sur Cloudinary")
+                
+            video_url = cloudinary_result.get('secure_url')
+            logger.info(f"Vidéo téléchargée sur Cloudinary: {video_url}")
+            
+            # Sauvegarder l'URL dans la base de données pour une utilisation future
+            from src.database import get_database
+            db = get_database()
+            
+            if db is not None:
+                video_collection = db.videos
+                video_collection.update_one(
+                    {"video_id": video_id},
+                    {"$set": {
+                        "video_id": video_id,
+                        "title": title,
+                        "cloudinary_url": video_url,
+                        "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+                        "created_at": time.time()
+                    }},
+                    upsert=True
+                )
+                logger.info(f"Vidéo sauvegardée dans la base de données: {video_id}")
+            
+            # Envoyer la vidéo à l'utilisateur
+            send_text_message(recipient_id, f"Voici votre vidéo : {title}")
+            send_video_message(recipient_id, video_url)
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Envoyer le lien YouTube comme solution de secours
+            send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+            
+    except Exception as e:
+        logger.error(f"Erreur dans le callback de téléchargement: {str(e)}")
+        logger.error(traceback.format_exc())
+        send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+
 def handle_watch_video(recipient_id, video_id, title):
     """
     Télécharge et envoie la vidéo YouTube
@@ -175,71 +258,35 @@ def handle_watch_video(recipient_id, video_id, title):
                 send_video_message(recipient_id, existing_video.get('cloudinary_url'))
                 return
         
-        # Essayer de télécharger la vidéo, mais avec une gestion améliorée des erreurs
-        try:
-            # Télécharger la vidéo dans un répertoire temporaire
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
-                video_path = download_youtube_video(video_id, temp_file)
-                
-                # Si le téléchargement a échoué ou renvoie une URL YouTube (erreur 429)
-                if not video_path or (isinstance(video_path, str) and video_path.startswith("https://www.youtube.com")):
-                    # Envoyer le lien YouTube comme solution de secours
-                    send_text_message(recipient_id, f"En raison des limitations de YouTube, je ne peux pas télécharger la vidéo pour le moment. Voici le lien direct: https://www.youtube.com/watch?v={video_id}")
-                    return
-                
-                # Si c'est un chemin de fichier, vérifier qu'il existe
-                if not os.path.exists(video_path):
-                    send_text_message(recipient_id, "Désolé, le téléchargement de la vidéo a échoué.")
-                    send_text_message(recipient_id, f"Vous pouvez regarder la vidéo directement sur YouTube: https://www.youtube.com/watch?v={video_id}")
-                    return
-                    
-                logger.info(f"Vidéo téléchargée avec succès: {video_path}")
-                
-                # Télécharger la vidéo sur Cloudinary pour obtenir une URL publique
-                try:
-                    cloudinary_result = upload_file(video_path, f"youtube_{video_id}", "video")
-                    
-                    if not cloudinary_result or not cloudinary_result.get('secure_url'):
-                        raise Exception("Échec du téléchargement sur Cloudinary")
-                        
-                    video_url = cloudinary_result.get('secure_url')
-                    logger.info(f"Vidéo téléchargée sur Cloudinary: {video_url}")
-                    
-                    # Sauvegarder l'URL dans la base de données pour une utilisation future
-                    if db is not None:
-                        video_collection = db.videos
-                        video_collection.update_one(
-                            {"video_id": video_id},
-                            {"$set": {
-                                "video_id": video_id,
-                                "title": title,
-                                "cloudinary_url": video_url,
-                                "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
-                                "created_at": time.time()
-                            }},
-                            upsert=True
-                        )
-                        logger.info(f"Vidéo sauvegardée dans la base de données: {video_id}")
-                    
-                    # Envoyer la vidéo à l'utilisateur
-                    send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-                    send_video_message(recipient_id, video_url)
-                    
-                except Exception as e:
-                    logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    
-                    # Envoyer le lien YouTube comme solution de secours
-                    send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+        # Initialiser le dictionnaire des téléchargements en cours pour cet utilisateur
+        if recipient_id not in pending_downloads:
+            pending_downloads[recipient_id] = {}
         
-        except Exception as e:
-            logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
-            logger.error(traceback.format_exc())
+        # Vérifier si un téléchargement est déjà en cours pour cette vidéo
+        if video_id in pending_downloads[recipient_id]:
+            send_text_message(recipient_id, "Le téléchargement de cette vidéo est déjà en cours. Veuillez patienter.")
+            return
+        
+        # Marquer le téléchargement comme en cours
+        pending_downloads[recipient_id][video_id] = True
+        
+        # Créer un répertoire temporaire pour le téléchargement
+        temp_dir = tempfile.mkdtemp()
+        temp_file = os.path.join(temp_dir, f"{video_id}.mp4")
+        
+        # Créer une fonction de callback pour le téléchargement
+        def download_callback(result):
+            handle_download_callback(recipient_id, video_id, title, result)
             
-            # Envoyer le lien YouTube comme solution de secours
-            send_text_message(recipient_id, f"Désolé, je n'ai pas pu télécharger la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
-            
+            # Nettoyer le répertoire temporaire
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                logger.error(f"Erreur lors du nettoyage du répertoire temporaire: {str(e)}")
+        
+        # Ajouter le téléchargement à la file d'attente
+        download_youtube_video(video_id, temp_file, download_callback)
+        
     except Exception as e:
         logger.error(f"Erreur lors du traitement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
