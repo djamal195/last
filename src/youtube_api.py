@@ -33,7 +33,7 @@ YOUTUBE_VIDEO_ID_REGEX = re.compile(r'^[0-9A-Za-z_-]{11}$')
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 5  # secondes (augmenté)
 MAX_BACKOFF = 120  # secondes (augmenté)
-MIN_REQUEST_INTERVAL = 5.0  # secondes entre les requêtes (augmenté)
+MIN_REQUEST_INTERVAL = 15.0  # Augmenté de 5 à 15 secondes
 
 # Cache simple pour les vidéos téléchargées
 VIDEO_CACHE = {}
@@ -42,7 +42,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Compteur global de requêtes pour limiter le nombre total
 REQUEST_COUNT = 0
-MAX_REQUESTS_PER_HOUR = 30  # Limite stricte
+MAX_REQUESTS_PER_HOUR = 10  # Réduit de 30 à 10
 
 # Heure de la dernière réinitialisation du compteur
 LAST_RESET_TIME = time.time()
@@ -483,15 +483,18 @@ class RateLimitedYouTube:
         """
         if not _check_rate_limit():
             raise Exception("Limite de requêtes atteinte")
-            
+        
         current_time = time.time()
         time_since_last_request = current_time - self.last_request_time
         
         if time_since_last_request < self.min_request_interval:
             sleep_time = self.min_request_interval - time_since_last_request
-            logger.info(f"Rate limiting pytube: attente de {sleep_time:.2f} secondes")
+            # Ajouter un délai aléatoire supplémentaire entre 1 et 5 secondes
+            random_delay = random.uniform(1, 5)
+            sleep_time += random_delay
+            logger.info(f"Rate limiting pytube: attente de {sleep_time:.2f} secondes (incluant {random_delay:.2f}s de délai aléatoire)")
             time.sleep(sleep_time)
-            
+        
         self.last_request_time = time.time()
     
     def get_youtube(self, video_url):
@@ -678,6 +681,11 @@ def download_youtube_video(video_id, output_path=None):
         logger.warning("Limite de requêtes atteinte, retour de l'URL YouTube")
         return f"https://www.youtube.com/watch?v={video_id}"
     
+    # Ajouter un délai aléatoire pour éviter les erreurs 429
+    random_delay = random.uniform(2, 8)
+    logger.info(f"Ajout d'un délai aléatoire de {random_delay:.2f} secondes avant le téléchargement")
+    time.sleep(random_delay)
+    
     # Méthode 1: Utiliser pytube directement
     if PYTUBE_AVAILABLE:
         try:
@@ -733,7 +741,7 @@ def download_youtube_video(video_id, output_path=None):
         logger.info("Tentative de téléchargement avec URL directe et requests")
         
         # Attendre un peu avant d'essayer la méthode alternative
-        time.sleep(2)
+        time.sleep(5)  # Augmenté de 2 à 5 secondes
         
         # Obtenir une URL directe
         direct_url = _get_direct_url(video_id)
