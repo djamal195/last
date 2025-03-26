@@ -389,47 +389,44 @@ class YouTubeAPI:
             logger.error(f"Erreur inattendue lors de la récupération des détails de la vidéo: {str(e)}")
             return None
 
-    def get_stream_url(self, video_id: str) -> Optional[str]:
+    def get_direct_video_url(self, video_id: str) -> Optional[str]:
         """
-        Obtient l'URL de streaming d'une vidéo YouTube en utilisant l'API
+        Tente d'obtenir une URL directe pour la vidéo YouTube
         
         Args:
             video_id: ID de la vidéo YouTube
             
         Returns:
-            URL de streaming ou None en cas d'erreur
+            URL directe ou None en cas d'erreur
         """
         # Valider l'ID de la vidéo
         if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
             logger.error(f"ID de vidéo invalide: {video_id}")
             return None
             
-        if not self.api_key:
-            logger.error("Impossible d'obtenir l'URL de streaming: clé API manquante")
-            return None
-            
         try:
-            logger.info(f"Récupération de l'URL de streaming pour la vidéo: {video_id}")
+            logger.info(f"Tentative d'obtention d'une URL directe pour la vidéo: {video_id}")
             
-            # Utiliser l'API YouTube pour obtenir les détails de la vidéo
+            # Utiliser l'API YouTube Data pour obtenir les détails de la vidéo
             video_details = self.get_video_details(video_id)
             
             if not video_details:
                 logger.warning(f"Aucun détail trouvé pour la vidéo: {video_id}")
                 return None
             
-            # Construire l'URL de la vidéo
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            # Construire l'URL YouTube standard
+            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
             
-            # Utiliser youtube-dl ou yt-dlp pour obtenir l'URL de streaming
-            # Cela nécessite d'installer youtube-dl ou yt-dlp
-            # Pour l'instant, nous retournons simplement l'URL YouTube
+            # Note: L'API YouTube Data ne fournit pas directement les URL de streaming
+            # Pour obtenir les URL de streaming, il faudrait utiliser une bibliothèque comme youtube-dl
+            # ou pytube, mais cela nécessite du scraping, ce qui n'est pas recommandé.
             
-            logger.info(f"URL de streaming obtenue pour la vidéo: {video_id}")
-            return video_url
+            # Pour l'instant, nous retournons simplement l'URL YouTube standard
+            logger.info(f"Retour de l'URL YouTube standard pour la vidéo: {video_id}")
+            return youtube_url
             
         except Exception as e:
-            logger.error(f"Erreur lors de la récupération de l'URL de streaming: {str(e)}")
+            logger.error(f"Erreur lors de la récupération de l'URL directe: {str(e)}")
             return None
 
 # Créer une instance de l'API pour une utilisation facile
@@ -788,20 +785,20 @@ def _download_video(video_id, output_path=None):
     
     # Utiliser l'API YouTube pour obtenir les détails de la vidéo
     try:
-        # Obtenir l'URL de streaming
-        stream_url = youtube_api.get_stream_url(video_id)
+        # Obtenir l'URL directe (si possible)
+        direct_url = youtube_api.get_direct_video_url(video_id)
         
-        if not stream_url:
-            logger.warning(f"Impossible d'obtenir l'URL de streaming pour la vidéo: {video_id}")
+        if not direct_url:
+            logger.warning(f"Impossible d'obtenir l'URL directe pour la vidéo: {video_id}")
             return f"https://www.youtube.com/watch?v={video_id}"
         
-        # Si l'URL de streaming est l'URL YouTube, la retourner directement
-        if stream_url.startswith("https://www.youtube.com/watch"):
-            logger.info(f"URL de streaming est l'URL YouTube, retour de l'URL: {stream_url}")
-            return stream_url
+        # Si l'URL directe est l'URL YouTube, la retourner directement
+        if direct_url.startswith("https://www.youtube.com/watch"):
+            logger.info(f"URL directe est l'URL YouTube, retour de l'URL: {direct_url}")
+            return direct_url
         
         # Télécharger la vidéo avec requests
-        if _download_with_requests(stream_url, output_path):
+        if _download_with_requests(direct_url, output_path):
             # Ajouter au cache
             try:
                 cache_path = _get_cache_path(video_id)
@@ -939,7 +936,7 @@ def start_download_thread():
     logger.info("Démarrage du thread de téléchargement")
     should_stop = False
     download_thread = threading.Thread(target=_process_download_queue)
-    download_thread.daemon = False  # Thread non-daemon pour qu'il puisse terminer ses tâches
+    download_thread.daemon = True  # Thread daemon pour qu'il s'arrête automatiquement à la fin du programme
     download_thread.start()
     
     # Vérifier que le thread a bien démarré
