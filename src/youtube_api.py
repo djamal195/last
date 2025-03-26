@@ -478,7 +478,7 @@ def _is_in_cache(video_id):
 
 def _download_with_yt_dlp(video_id, output_path):
     """
-    Télécharge une vidéo YouTube en utilisant yt-dlp
+    Télécharge une vidéo YouTube en utilisant yt-dlp avec authentification
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -493,9 +493,25 @@ def _download_with_yt_dlp(video_id, output_path):
             import yt_dlp
             logger.info("yt-dlp est installé, utilisation de la bibliothèque Python")
             
+            # Chemin vers le fichier de cookies (à créer)
+            cookies_file = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
+            
+            # Si le fichier de cookies n'existe pas, créer un fichier vide
+            if not os.path.exists(cookies_file):
+                # Essayer de récupérer les cookies depuis les variables d'environnement
+                youtube_cookies = os.environ.get('YOUTUBE_COOKIES')
+                if youtube_cookies:
+                    logger.info("Utilisation des cookies YouTube depuis les variables d'environnement")
+                    with open(cookies_file, 'w') as f:
+                        f.write(youtube_cookies)
+                else:
+                    logger.warning("Aucun cookie YouTube trouvé, le téléchargement pourrait échouer")
+                    # Créer un fichier vide
+                    open(cookies_file, 'w').close()
+            
             # Options pour yt-dlp
             ydl_opts = {
-                'format': 'mp4[height<=720]',  # Format MP4 avec hauteur maximale de 720p
+                'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
                 'outtmpl': output_path,
                 'quiet': True,
                 'no_warnings': True,
@@ -504,10 +520,16 @@ def _download_with_yt_dlp(video_id, output_path):
                 'retries': 3,
                 'fragment_retries': 3,
                 'skip_download': False,
-                'postprocessors': [{
-                    'key': 'FFmpegVideoConvertor',
-                    'preferedformat': 'mp4',
-                }],
+                'cookies': cookies_file,  # Utiliser le fichier de cookies
+                'cookiesfrombrowser': ('chrome',),  # Essayer de récupérer les cookies depuis Chrome
+                'geo_bypass': True,  # Contourner les restrictions géographiques
+                'geo_bypass_country': 'US',  # Utiliser les États-Unis comme pays
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'web'],  # Utiliser le client Android et Web
+                        'player_skip': ['webpage', 'js'],  # Ignorer certaines vérifications
+                    }
+                }
             }
             
             # URL de la vidéo
@@ -524,7 +546,10 @@ def _download_with_yt_dlp(video_id, output_path):
                 return True
             else:
                 logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-                return False
+                
+                # Essayer une méthode alternative
+                logger.info("Tentative de téléchargement avec une méthode alternative")
+                return _download_with_alternative_method(video_id, output_path)
                 
         except ImportError:
             logger.warning("yt-dlp n'est pas installé en tant que bibliothèque Python, tentative d'utilisation de la commande")
@@ -532,10 +557,13 @@ def _download_with_yt_dlp(video_id, output_path):
             # Utiliser la commande yt-dlp
             video_url = f"https://www.youtube.com/watch?v={video_id}"
             
+            # Chemin vers le fichier de cookies
+            cookies_file = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
+            
             # Construire la commande
             cmd = [
                 "yt-dlp",
-                "-f", "mp4[height<=720]",  # Format MP4 avec hauteur maximale de 720p
+                "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
                 "-o", output_path,
                 "--quiet",
                 "--no-warnings",
@@ -543,6 +571,8 @@ def _download_with_yt_dlp(video_id, output_path):
                 "--no-playlist",
                 "--retries", "3",
                 "--fragment-retries", "3",
+                "--cookies", cookies_file,
+                "--geo-bypass",
                 video_url
             ]
             
@@ -553,7 +583,8 @@ def _download_with_yt_dlp(video_id, output_path):
             # Vérifier le résultat
             if result.returncode != 0:
                 logger.error(f"Erreur lors de l'exécution de yt-dlp: {result.stderr}")
-                return False
+                # Essayer une méthode alternative
+                return _download_with_alternative_method(video_id, output_path)
             
             # Vérifier que le fichier a été téléchargé
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -561,10 +592,72 @@ def _download_with_yt_dlp(video_id, output_path):
                 return True
             else:
                 logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-                return False
+                # Essayer une méthode alternative
+                return _download_with_alternative_method(video_id, output_path)
     
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # Essayer une méthode alternative
+        return _download_with_alternative_method(video_id, output_path)
+
+def _download_with_alternative_method(video_id, output_path):
+    """
+    Méthode alternative pour télécharger une vidéo YouTube
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin où enregistrer la vidéo
+        
+    Returns:
+        True si le téléchargement a réussi, False sinon
+    """
+    try:
+        logger.info(f"Tentative de téléchargement alternatif pour la vidéo {video_id}")
+        
+        # Essayer d'utiliser pytube comme alternative
+        try:
+            from pytube import YouTube
+            
+            # URL de la vidéo
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Télécharger la vidéo
+            logger.info(f"Téléchargement de la vidéo {video_id} avec pytube")
+            yt = YouTube(video_url)
+            
+            # Obtenir le flux vidéo de meilleure qualité en MP4
+            video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+            
+            if not video_stream:
+                logger.warning(f"Aucun flux vidéo MP4 trouvé pour {video_id}, essai avec n'importe quel format")
+                video_stream = yt.streams.filter(progressive=True).order_by('resolution').desc().first()
+            
+            if not video_stream:
+                logger.error(f"Aucun flux vidéo trouvé pour {video_id}")
+                return False
+            
+            # Télécharger la vidéo
+            video_stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
+            
+            # Vérifier que le fichier a été téléchargé
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"Vidéo téléchargée avec succès via pytube: {output_path} ({os.path.getsize(output_path)} octets)")
+                return True
+            else:
+                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+                return False
+                
+        except ImportError:
+            logger.warning("pytube n'est pas installé, impossible d'utiliser cette méthode alternative")
+            return False
+        except Exception as e:
+            logger.error(f"Erreur lors du téléchargement avec pytube: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement alternatif: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
