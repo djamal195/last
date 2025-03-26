@@ -54,6 +54,9 @@ should_stop = False
 # Flag pour indiquer si le thread de téléchargement est en cours d'exécution
 download_thread_running = False
 
+# Thread de téléchargement
+download_thread = None
+
 # Sauvegarde de la file d'attente pour la persistance
 QUEUE_BACKUP_FILE = os.path.join(tempfile.gettempdir(), 'youtube_queue_backup.json')
 
@@ -677,7 +680,7 @@ def _process_download_queue():
                         
                         # Récupérer les informations de la vidéo depuis la base de données
                         db = get_database()
-                        if db:
+                        if db is not None:
                             pending_downloads = db.pending_downloads
                             pending = pending_downloads.find_one({"video_id": video_id})
                             
@@ -701,8 +704,6 @@ def _process_download_queue():
                     try:
                         callback(None)
                     except Exception as e:
-                        logger.error(f"Erreur lors de l'appel du callback d'erreur: {str(e)}")
-             
                         logger.error(f"Erreur lors de l'appel du callback d'erreur: {str(e)}")
             
             finally:
@@ -833,9 +834,11 @@ def download_youtube_video(video_id, output_path=None, callback=None):
     """
     global current_downloads, download_thread_running
     
+    logger.info(f"État du thread de téléchargement: en cours d'exécution = {download_thread_running}, thread vivant = {download_thread and download_thread.is_alive()}")
+    
     try:
         # S'assurer que le thread de téléchargement est en cours d'exécution
-        if not download_thread_running:
+        if not download_thread_running or not download_thread or not download_thread.is_alive():
             logger.warning("Le thread de téléchargement n'est pas en cours d'exécution, redémarrage...")
             start_download_thread()
         
@@ -883,7 +886,7 @@ def download_youtube_video(video_id, output_path=None, callback=None):
             try:
                 from src.database import get_database
                 db = get_database()
-                if db and callback:
+                if db is not None and callback:
                     # Essayer de trouver l'ID du destinataire à partir du callback
                     import inspect
                     callback_source = inspect.getsource(callback)
@@ -909,12 +912,13 @@ def download_youtube_video(video_id, output_path=None, callback=None):
                             logger.info(f"Téléchargement sauvegardé dans la base de données: {video_id} pour {recipient_id}")
             except Exception as e:
                 logger.error(f"Erreur lors de la sauvegarde du téléchargement dans la base de données: {str(e)}")
+                logger.error(traceback.format_exc())
             
             return True
             
     except Exception as e:
         logger.error(f"Erreur lors de l'ajout du téléchargement à la file d'attente: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        logger.error(traceback.format_exc())
         
         # Appeler le callback avec None en cas d'erreur
         if callback:
@@ -928,7 +932,7 @@ def start_download_thread():
     """
     global download_thread, download_thread_running, should_stop
     
-    if download_thread_running:
+    if download_thread_running and download_thread and download_thread.is_alive():
         logger.info("Le thread de téléchargement est déjà en cours d'exécution")
         return
     
@@ -937,6 +941,13 @@ def start_download_thread():
     download_thread = threading.Thread(target=_process_download_queue)
     download_thread.daemon = False  # Thread non-daemon pour qu'il puisse terminer ses tâches
     download_thread.start()
+    
+    # Vérifier que le thread a bien démarré
+    time.sleep(0.5)
+    if download_thread.is_alive():
+        logger.info("Thread de téléchargement démarré avec succès")
+    else:
+        logger.error("Échec du démarrage du thread de téléchargement")
 
 def stop_download_thread():
     """
