@@ -9,3 +9,5 @@ requests-toolbelt>=0.10.1
 gunicorn>=20.1.0
 cloudinary>=1.33.0
 pytube==15.0.0
+yt-dlp>=2023.3.4
+ffmpeg-python>=0.2.0
