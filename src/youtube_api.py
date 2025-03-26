@@ -682,8 +682,6 @@ def _process_download_queue():
                                 recipient_id = pending.get("recipient_id")
                                 title = pending.get("title", "Vidéo YouTube")
                                 
-                                if recipient_id:  "Vidéo YouTube")
-                                
                                 if recipient_id:
                                     logger.info(f"Notification de téléchargement pour {recipient_id}, vidéo {video_id}")
                                     handle_download_callback(recipient_id, video_id, title, result)
