@@ -9,6 +9,7 @@ import threading
 import queue
 import signal
 import atexit
+import subprocess
 from typing import List, Dict, Optional, Any, Tuple
 import logging
 import tempfile
@@ -389,46 +390,6 @@ class YouTubeAPI:
             logger.error(f"Erreur inattendue lors de la récupération des détails de la vidéo: {str(e)}")
             return None
 
-    def get_direct_video_url(self, video_id: str) -> Optional[str]:
-        """
-        Tente d'obtenir une URL directe pour la vidéo YouTube
-        
-        Args:
-            video_id: ID de la vidéo YouTube
-            
-        Returns:
-            URL directe ou None en cas d'erreur
-        """
-        # Valider l'ID de la vidéo
-        if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
-            logger.error(f"ID de vidéo invalide: {video_id}")
-            return None
-            
-        try:
-            logger.info(f"Tentative d'obtention d'une URL directe pour la vidéo: {video_id}")
-            
-            # Utiliser l'API YouTube Data pour obtenir les détails de la vidéo
-            video_details = self.get_video_details(video_id)
-            
-            if not video_details:
-                logger.warning(f"Aucun détail trouvé pour la vidéo: {video_id}")
-                return None
-            
-            # Construire l'URL YouTube standard
-            youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # Note: L'API YouTube Data ne fournit pas directement les URL de streaming
-            # Pour obtenir les URL de streaming, il faudrait utiliser une bibliothèque comme youtube-dl
-            # ou pytube, mais cela nécessite du scraping, ce qui n'est pas recommandé.
-            
-            # Pour l'instant, nous retournons simplement l'URL YouTube standard
-            logger.info(f"Retour de l'URL YouTube standard pour la vidéo: {video_id}")
-            return youtube_url
-            
-        except Exception as e:
-            logger.error(f"Erreur lors de la récupération de l'URL directe: {str(e)}")
-            return None
-
 # Créer une instance de l'API pour une utilisation facile
 youtube_api = YouTubeAPI()
 
@@ -515,59 +476,95 @@ def _is_in_cache(video_id):
     cache_path = _get_cache_path(video_id)
     return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
 
-def _download_with_requests(url, output_path):
+def _download_with_yt_dlp(video_id, output_path):
     """
-    Télécharge un fichier à partir d'une URL en utilisant requests
+    Télécharge une vidéo YouTube en utilisant yt-dlp
     
     Args:
-        url: URL du fichier à télécharger
-        output_path: Chemin où enregistrer le fichier
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin où enregistrer la vidéo
         
     Returns:
         True si le téléchargement a réussi, False sinon
     """
     try:
-        logger.info(f"Téléchargement du fichier depuis: {url}")
-        logger.info(f"Vers: {output_path}")
-        
-        # Vérifier si le répertoire de destination existe
-        output_dir = os.path.dirname(output_path)
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-            logger.info(f"Répertoire créé: {output_dir}")
-        
-        # Télécharger le fichier
-        response = requests.get(url, stream=True, timeout=60)
-        response.raise_for_status()
-        
-        # Vérifier les permissions d'écriture
+        # Vérifier si yt-dlp est installé
         try:
-            with open(output_path, 'wb') as f:
-                f.write(b'test')
-            os.remove(output_path)
-            logger.info("Test d'écriture réussi")
-        except Exception as e:
-            logger.error(f"Erreur lors du test d'écriture: {str(e)}")
-            # Essayer un autre répertoire
-            output_path = os.path.join('/tmp', os.path.basename(output_path))
-            logger.info(f"Nouvel emplacement de sortie: {output_path}")
-        
-        # Télécharger le fichier par morceaux pour éviter les problèmes de mémoire
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        
-        # Vérifier que le fichier a été téléchargé
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            logger.info(f"Fichier téléchargé avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
-            return True
-        else:
-            logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-            return False
+            import yt_dlp
+            logger.info("yt-dlp est installé, utilisation de la bibliothèque Python")
             
+            # Options pour yt-dlp
+            ydl_opts = {
+                'format': 'mp4[height<=720]',  # Format MP4 avec hauteur maximale de 720p
+                'outtmpl': output_path,
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': True,
+                'noplaylist': True,
+                'retries': 3,
+                'fragment_retries': 3,
+                'skip_download': False,
+                'postprocessors': [{
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4',
+                }],
+            }
+            
+            # URL de la vidéo
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Télécharger la vidéo
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                logger.info(f"Téléchargement de la vidéo {video_id} avec yt-dlp (bibliothèque)")
+                ydl.download([video_url])
+            
+            # Vérifier que le fichier a été téléchargé
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
+                return True
+            else:
+                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+                return False
+                
+        except ImportError:
+            logger.warning("yt-dlp n'est pas installé en tant que bibliothèque Python, tentative d'utilisation de la commande")
+            
+            # Utiliser la commande yt-dlp
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Construire la commande
+            cmd = [
+                "yt-dlp",
+                "-f", "mp4[height<=720]",  # Format MP4 avec hauteur maximale de 720p
+                "-o", output_path,
+                "--quiet",
+                "--no-warnings",
+                "--ignore-errors",
+                "--no-playlist",
+                "--retries", "3",
+                "--fragment-retries", "3",
+                video_url
+            ]
+            
+            # Exécuter la commande
+            logger.info(f"Téléchargement de la vidéo {video_id} avec yt-dlp (commande)")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Vérifier le résultat
+            if result.returncode != 0:
+                logger.error(f"Erreur lors de l'exécution de yt-dlp: {result.stderr}")
+                return False
+            
+            # Vérifier que le fichier a été téléchargé
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
+                return True
+            else:
+                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+                return False
+    
     except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec requests: {str(e)}")
+        logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
@@ -685,6 +682,8 @@ def _process_download_queue():
                                 recipient_id = pending.get("recipient_id")
                                 title = pending.get("title", "Vidéo YouTube")
                                 
+                                if recipient_id:  "Vidéo YouTube")
+                                
                                 if recipient_id:
                                     logger.info(f"Notification de téléchargement pour {recipient_id}, vidéo {video_id}")
                                     handle_download_callback(recipient_id, video_id, title, result)
@@ -783,22 +782,10 @@ def _download_video(video_id, output_path=None):
     logger.info(f"Ajout d'un délai aléatoire de {random_delay:.2f} secondes avant le téléchargement")
     time.sleep(random_delay)
     
-    # Utiliser l'API YouTube pour obtenir les détails de la vidéo
+    # Télécharger la vidéo avec yt-dlp
     try:
-        # Obtenir l'URL directe (si possible)
-        direct_url = youtube_api.get_direct_video_url(video_id)
-        
-        if not direct_url:
-            logger.warning(f"Impossible d'obtenir l'URL directe pour la vidéo: {video_id}")
-            return f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Si l'URL directe est l'URL YouTube, la retourner directement
-        if direct_url.startswith("https://www.youtube.com/watch"):
-            logger.info(f"URL directe est l'URL YouTube, retour de l'URL: {direct_url}")
-            return direct_url
-        
-        # Télécharger la vidéo avec requests
-        if _download_with_requests(direct_url, output_path):
+        # Télécharger la vidéo
+        if _download_with_yt_dlp(video_id, output_path):
             # Ajouter au cache
             try:
                 cache_path = _get_cache_path(video_id)
@@ -809,7 +796,7 @@ def _download_video(video_id, output_path=None):
             
             return output_path
         else:
-            logger.error(f"Échec du téléchargement de la vidéo avec requests")
+            logger.error(f"Échec du téléchargement de la vidéo avec yt-dlp")
             return f"https://www.youtube.com/watch?v={video_id}"
             
     except Exception as e:
