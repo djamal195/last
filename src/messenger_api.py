@@ -1,9 +1,11 @@
+# Dans src/messenger_api.py, ajoutez l'import shutil en haut du fichier
 import os
 import json
 import requests
 import traceback
 import tempfile
 import time
+import shutil  # Ajout de cet import manquant
 from typing import Dict, Any, Optional
 from src.utils.logger import get_logger
 from src.mistral_api import generate_mistral_response
@@ -280,7 +282,9 @@ def handle_watch_video(recipient_id, video_id, title):
             
             # Nettoyer le répertoire temporaire
             try:
-                shutil.rmtree(temp_dir)
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                    logger.info(f"Répertoire temporaire nettoyé: {temp_dir}")
             except Exception as e:
                 logger.error(f"Erreur lors du nettoyage du répertoire temporaire: {str(e)}")
         
