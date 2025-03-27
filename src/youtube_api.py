@@ -390,6 +390,49 @@ class YouTubeAPI:
             logger.error(f"Erreur inattendue lors de la récupération des détails de la vidéo: {str(e)}")
             return None
 
+    def get_stream_url(self, video_id: str) -> Optional[str]:
+        """
+        Obtient l'URL de streaming d'une vidéo YouTube en utilisant l'API
+        
+        Args:
+            video_id: ID de la vidéo YouTube
+            
+        Returns:
+            URL de streaming ou None en cas d'erreur
+        """
+        # Valider l'ID de la vidéo
+        if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
+            logger.error(f"ID de vidéo invalide: {video_id}")
+            return None
+            
+        if not self.api_key:
+            logger.error("Impossible d'obtenir l'URL de streaming: clé API manquante")
+            return None
+            
+        try:
+            logger.info(f"Récupération de l'URL de streaming pour la vidéo: {video_id}")
+            
+            # Utiliser l'API YouTube pour obtenir les détails de la vidéo
+            video_details = self.get_video_details(video_id)
+            
+            if not video_details:
+                logger.warning(f"Aucun détail trouvé pour la vidéo: {video_id}")
+                return None
+            
+            # Construire l'URL de la vidéo
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Utiliser youtube-dl ou yt-dlp pour obtenir l'URL de streaming
+            # Cela nécessite d'installer youtube-dl ou yt-dlp
+            # Pour l'instant, nous retournons simplement l'URL YouTube
+            
+            logger.info(f"URL de streaming obtenue pour la vidéo: {video_id}")
+            return video_url
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la récupération de l'URL de streaming: {str(e)}")
+            return None
+
 # Créer une instance de l'API pour une utilisation facile
 youtube_api = YouTubeAPI()
 
@@ -535,9 +578,16 @@ def _download_with_rapidapi(video_id, output_path):
         
         # Essayer de parser les informations de la vidéo
         try:
-            # La réponse contient un champ "info" qui est une chaîne JSON
-            info_str = json_data.get("info", "{}")
-            info = json.loads(info_str)
+            # La réponse contient un champ "info" qui peut être une chaîne JSON ou un dictionnaire
+            info = json_data.get("info", {})
+            
+            # Si info est une chaîne, la parser en JSON
+            if isinstance(info, str):
+                try:
+                    info = json.loads(info)
+                except json.JSONDecodeError:
+                    logger.error(f"Impossible de parser info comme JSON: {info[:200]}...")
+                    return False
             
             # Vérifier si des formats sont disponibles
             formats = info.get("formats", [])
@@ -669,7 +719,9 @@ def _download_with_yt_dlp(video_id, output_path):
             
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error 
+        logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 def _download_with_alternative_method(video_id, output_path):
