@@ -701,7 +701,6 @@ def _download_with_alternative_method(video_id, output_path):
             video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
             
             if not video_stream:
-                logger.warning(f"Aucun flux vidéo MP4 trouvé pour {video_id}, essai avec 
                 logger.warning(f"Aucun flux vidéo MP4 trouvé pour {video_id}, essai avec n'importe quel format")
                 video_stream = yt.streams.filter(progressive=True).order_by('resolution').desc().first()
             
