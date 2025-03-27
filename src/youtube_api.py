@@ -476,9 +476,9 @@ def _is_in_cache(video_id):
     cache_path = _get_cache_path(video_id)
     return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
 
-def _download_with_yt_dlp(video_id, output_path):
+def _download_with_rapidapi(video_id, output_path):
     """
-    Télécharge une vidéo YouTube en utilisant yt-dlp avec authentification
+    Télécharge une vidéo YouTube en utilisant l'API RapidAPI
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -488,118 +488,172 @@ def _download_with_yt_dlp(video_id, output_path):
         True si le téléchargement a réussi, False sinon
     """
     try:
-        # Vérifier si yt-dlp est installé
+        import http.client
+        import json
+        import urllib.parse
+        
+        # URL YouTube complète
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        encoded_url = urllib.parse.quote(youtube_url)
+        
+        # Connexion à l'API RapidAPI
+        conn = http.client.HTTPSConnection("youtube-info-download-api.p.rapidapi.com")
+        
+        # En-têtes avec la clé API
+        headers = {
+            'x-rapidapi-key': os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208"),
+            'x-rapidapi-host': "youtube-info-download-api.p.rapidapi.com"
+        }
+        
+        # Requête à l'API
+        endpoint = f"/ajax/api.php?function=i&u={encoded_url}"
+        logger.info(f"Requête à RapidAPI: {endpoint}")
+        
+        conn.request("GET", endpoint, headers=headers)
+        
+        # Récupération de la réponse
+        res = conn.getresponse()
+        data = res.read().decode("utf-8")
+        
+        # Vérifier le code de statut
+        if res.status != 200:
+            logger.error(f"Erreur de l'API RapidAPI: {res.status} - {data}")
+            return False
+        
+        # Analyser la réponse JSON
         try:
-            import yt_dlp
-            logger.info("yt-dlp est installé, utilisation de la bibliothèque Python")
+            json_data = json.loads(data)
+            logger.info(f"Réponse de l'API RapidAPI reçue: {json.dumps(json_data)[:200]}...")
+        except json.JSONDecodeError:
+            logger.error(f"Réponse non-JSON reçue: {data[:200]}...")
+            return False
+        
+        # Vérifier si la réponse contient des liens de téléchargement
+        if not json_data or "links" not in json_data:
+            logger.error("Aucun lien de téléchargement trouvé dans la réponse")
+            return False
+        
+        # Trouver le meilleur lien MP4
+        mp4_links = []
+        for link in json_data.get("links", []):
+            if link.get("type") == "mp4":
+                mp4_links.append(link)
+        
+        if not mp4_links:
+            logger.error("Aucun lien MP4 trouvé")
+            return False
+        
+        # Trier par qualité (résolution)
+        mp4_links.sort(key=lambda x: int(x.get("quality", "0").replace("p", "")), reverse=True)
+        
+        # Prendre le lien de meilleure qualité
+        best_link = mp4_links[0]
+        download_url = best_link.get("url")
+        
+        if not download_url:
+            logger.error("URL de téléchargement non trouvée")
+            return False
+        
+        # Télécharger la vidéo
+        logger.info(f"Téléchargement de la vidéo depuis {download_url}")
+        response = requests.get(download_url, stream=True, timeout=60)
+        
+        # Vérifier la réponse
+        if response.status_code != 200:
+            logger.error(f"Erreur lors du téléchargement: {response.status_code}")
+            return False
+        
+        # Enregistrer la vidéo
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Vérifier que le fichier a été téléchargé
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
+            return True
+        else:
+            logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+            return False
             
-            # Chemin vers le fichier de cookies (à créer)
-            cookies_file = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
-            
-            # Si le fichier de cookies n'existe pas, créer un fichier vide
-            if not os.path.exists(cookies_file):
-                # Essayer de récupérer les cookies depuis les variables d'environnement
-                youtube_cookies = os.environ.get('YOUTUBE_COOKIES')
-                if youtube_cookies:
-                    logger.info("Utilisation des cookies YouTube depuis les variables d'environnement")
-                    with open(cookies_file, 'w') as f:
-                        f.write(youtube_cookies)
-                else:
-                    logger.warning("Aucun cookie YouTube trouvé, le téléchargement pourrait échouer")
-                    # Créer un fichier vide
-                    open(cookies_file, 'w').close()
-            
-            # Options pour yt-dlp
-            ydl_opts = {
-                'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
-                'outtmpl': output_path,
-                'quiet': True,
-                'no_warnings': True,
-                'ignoreerrors': True,
-                'noplaylist': True,
-                'retries': 3,
-                'fragment_retries': 3,
-                'skip_download': False,
-                'cookies': cookies_file,  # Utiliser le fichier de cookies
-                'cookiesfrombrowser': ('chrome',),  # Essayer de récupérer les cookies depuis Chrome
-                'geo_bypass': True,  # Contourner les restrictions géographiques
-                'geo_bypass_country': 'US',  # Utiliser les États-Unis comme pays
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android', 'web'],  # Utiliser le client Android et Web
-                        'player_skip': ['webpage', 'js'],  # Ignorer certaines vérifications
-                    }
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement avec RapidAPI: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+def _download_with_yt_dlp(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube en utilisant yt-dlp avec un fichier de cookies
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin où enregistrer la vidéo
+        
+    Returns:
+        True si le téléchargement a réussi, False sinon
+    """
+    try:
+        # Créer un fichier de cookies temporaire
+        cookies_file = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
+        
+        # Récupérer les cookies depuis les variables d'environnement
+        youtube_cookies = os.environ.get('YOUTUBE_COOKIES')
+        if youtube_cookies:
+            logger.info("Utilisation des cookies YouTube depuis les variables d'environnement")
+            with open(cookies_file, 'w') as f:
+                f.write(youtube_cookies)
+        else:
+            # Si pas de cookies, créer un fichier de cookies minimal
+            logger.warning("Aucun cookie YouTube trouvé, création d'un fichier minimal")
+            with open(cookies_file, 'w') as f:
+                f.write("# Netscape HTTP Cookie File\n")
+                f.write(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tCONSENT\tYES+cb\n")
+        
+        import yt_dlp
+        
+        # Options pour yt-dlp
+        ydl_opts = {
+            'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': True,
+            'noplaylist': True,
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_download': False,
+            'cookies': cookies_file,  # Utiliser le fichier de cookies créé
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['webpage', 'js'],
                 }
             }
+        }
+        
+        # URL de la vidéo
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Télécharger la vidéo
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            logger.info(f"Téléchargement de la vidéo {video_id} avec yt-dlp")
+            ydl.download([video_url])
+        
+        # Vérifier que le fichier a été téléchargé
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info(f"Vidéo téléchargée avec succès: {output_path}")
+            return True
+        else:
+            logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+            return False
             
-            # URL de la vidéo
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # Télécharger la vidéo
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                logger.info(f"Téléchargement de la vidéo {video_id} avec yt-dlp (bibliothèque)")
-                ydl.download([video_url])
-            
-            # Vérifier que le fichier a été téléchargé
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
-                return True
-            else:
-                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-                
-                # Essayer une méthode alternative
-                logger.info("Tentative de téléchargement avec une méthode alternative")
-                return _download_with_alternative_method(video_id, output_path)
-                
-        except ImportError:
-            logger.warning("yt-dlp n'est pas installé en tant que bibliothèque Python, tentative d'utilisation de la commande")
-            
-            # Utiliser la commande yt-dlp
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # Chemin vers le fichier de cookies
-            cookies_file = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
-            
-            # Construire la commande
-            cmd = [
-                "yt-dlp",
-                "-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
-                "-o", output_path,
-                "--quiet",
-                "--no-warnings",
-                "--ignore-errors",
-                "--no-playlist",
-                "--retries", "3",
-                "--fragment-retries", "3",
-                "--cookies", cookies_file,
-                "--geo-bypass",
-                video_url
-            ]
-            
-            # Exécuter la commande
-            logger.info(f"Téléchargement de la vidéo {video_id} avec yt-dlp (commande)")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            # Vérifier le résultat
-            if result.returncode != 0:
-                logger.error(f"Erreur lors de l'exécution de yt-dlp: {result.stderr}")
-                # Essayer une méthode alternative
-                return _download_with_alternative_method(video_id, output_path)
-            
-            # Vérifier que le fichier a été téléchargé
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
-                return True
-            else:
-                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-                # Essayer une méthode alternative
-                return _download_with_alternative_method(video_id, output_path)
-    
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        # Essayer une méthode alternative
-        return _download_with_alternative_method(video_id, output_path)
+        logger.error(traceback.format_exc())
+        return False
 
 def _download_with_alternative_method(video_id, output_path):
     """
@@ -873,27 +927,48 @@ def _download_video(video_id, output_path=None):
     logger.info(f"Ajout d'un délai aléatoire de {random_delay:.2f} secondes avant le téléchargement")
     time.sleep(random_delay)
     
-    # Télécharger la vidéo avec yt-dlp
-    try:
-        # Télécharger la vidéo
-        if _download_with_yt_dlp(video_id, output_path):
-            # Ajouter au cache
-            try:
-                cache_path = _get_cache_path(video_id)
-                shutil.copy2(output_path, cache_path)
-                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
-            
-            return output_path
-        else:
-            logger.error(f"Échec du téléchargement de la vidéo avec yt-dlp")
-            return f"https://www.youtube.com/watch?v={video_id}"
-            
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return f"https://www.youtube.com/watch?v={video_id}"
+    # Essayer d'abord avec RapidAPI
+    logger.info("Tentative de téléchargement avec RapidAPI")
+    if _download_with_rapidapi(video_id, output_path):
+        # Ajouter au cache
+        try:
+            cache_path = _get_cache_path(video_id)
+            shutil.copy2(output_path, cache_path)
+            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
+        
+        return output_path
+    
+    # Si RapidAPI échoue, essayer avec yt-dlp
+    logger.info("RapidAPI a échoué, tentative avec yt-dlp")
+    if _download_with_yt_dlp(video_id, output_path):
+        # Ajouter au cache
+        try:
+            cache_path = _get_cache_path(video_id)
+            shutil.copy2(output_path, cache_path)
+            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
+        
+        return output_path
+    
+    # Si yt-dlp échoue, essayer avec pytube
+    logger.info("yt-dlp a échoué, tentative avec pytube")
+    if _download_with_alternative_method(video_id, output_path):
+        # Ajouter au cache
+        try:
+            cache_path = _get_cache_path(video_id)
+            shutil.copy2(output_path, cache_path)
+            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
+        
+        return output_path
+    
+    # Si tout échoue, retourner l'URL YouTube
+    logger.error(f"Toutes les méthodes de téléchargement ont échoué")
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 def download_youtube_video(video_id, output_path=None, callback=None):
     """
