@@ -124,7 +124,7 @@ def upload_file(file_path, public_id=None, resource_type="auto"):
             logger.info(f"Fichier téléchargé avec succès: {result.get('public_id')}")
             logger.info(f"URL du fichier: {result.get('secure_url')}")
             return result
-        except cloudinary.exceptions.Error as e:
+        except Exception as e:
             logger.error(f"Erreur Cloudinary: {str(e)}")
             
             # Essayer avec un autre type de ressource si auto n'a pas fonctionné
