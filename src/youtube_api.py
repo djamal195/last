@@ -528,53 +528,70 @@ def _download_with_rapidapi(video_id, output_path):
             logger.error(f"Réponse non-JSON reçue: {data[:200]}...")
             return False
         
-        # Vérifier si la réponse contient des liens de téléchargement
-        if not json_data or "links" not in json_data:
-            logger.error("Aucun lien de téléchargement trouvé dans la réponse")
+        # Vérifier si la réponse contient des informations
+        if not json_data or not json_data.get("successfull"):
+            logger.error("Réponse RapidAPI invalide ou échec")
             return False
         
-        # Trouver le meilleur lien MP4
-        mp4_links = []
-        for link in json_data.get("links", []):
-            if link.get("type") == "mp4":
-                mp4_links.append(link)
-        
-        if not mp4_links:
-            logger.error("Aucun lien MP4 trouvé")
-            return False
-        
-        # Trier par qualité (résolution)
-        mp4_links.sort(key=lambda x: int(x.get("quality", "0").replace("p", "")), reverse=True)
-        
-        # Prendre le lien de meilleure qualité
-        best_link = mp4_links[0]
-        download_url = best_link.get("url")
-        
-        if not download_url:
-            logger.error("URL de téléchargement non trouvée")
-            return False
-        
-        # Télécharger la vidéo
-        logger.info(f"Téléchargement de la vidéo depuis {download_url}")
-        response = requests.get(download_url, stream=True, timeout=60)
-        
-        # Vérifier la réponse
-        if response.status_code != 200:
-            logger.error(f"Erreur lors du téléchargement: {response.status_code}")
-            return False
-        
-        # Enregistrer la vidéo
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        
-        # Vérifier que le fichier a été téléchargé
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
-            return True
-        else:
-            logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+        # Essayer de parser les informations de la vidéo
+        try:
+            # La réponse contient un champ "info" qui est une chaîne JSON
+            info_str = json_data.get("info", "{}")
+            info = json.loads(info_str)
+            
+            # Vérifier si des formats sont disponibles
+            formats = info.get("formats", [])
+            if not formats:
+                logger.error("Aucun format de vidéo trouvé dans la réponse")
+                return False
+            
+            # Trouver les formats MP4
+            mp4_formats = []
+            for fmt in formats:
+                if fmt.get("ext") == "mp4" and fmt.get("url"):
+                    mp4_formats.append(fmt)
+            
+            if not mp4_formats:
+                logger.error("Aucun format MP4 trouvé")
+                return False
+            
+            # Trier par qualité (résolution)
+            mp4_formats.sort(key=lambda x: int(x.get("height", 0)), reverse=True)
+            
+            # Prendre le format de meilleure qualité
+            best_format = mp4_formats[0]
+            download_url = best_format.get("url")
+            
+            if not download_url:
+                logger.error("URL de téléchargement non trouvée")
+                return False
+            
+            # Télécharger la vidéo
+            logger.info(f"Téléchargement de la vidéo depuis {download_url[:100]}...")
+            response = requests.get(download_url, stream=True, timeout=60)
+            
+            # Vérifier la réponse
+            if response.status_code != 200:
+                logger.error(f"Erreur lors du téléchargement: {response.status_code}")
+                return False
+            
+            # Enregistrer la vidéo
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Vérifier que le fichier a été téléchargé
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
+                return True
+            else:
+                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement de la réponse RapidAPI: {str(e)}")
+            logger.error(traceback.format_exc())
             return False
             
     except Exception as e:
@@ -684,6 +701,7 @@ def _download_with_alternative_method(video_id, output_path):
             video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
             
             if not video_stream:
+                logger.warning(f"Aucun flux vidéo MP4 trouvé pour {video_id}, essai avec 
                 logger.warning(f"Aucun flux vidéo MP4 trouvé pour {video_id}, essai avec n'importe quel format")
                 video_stream = yt.streams.filter(progressive=True).order_by('resolution').desc().first()
             
