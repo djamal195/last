@@ -5,6 +5,7 @@ import traceback
 import tempfile
 import time
 import shutil
+import subprocess
 from typing import Dict, Any, Optional
 from src.utils.logger import get_logger
 from src.mistral_api import generate_mistral_response
@@ -210,6 +211,73 @@ def send_youtube_results(recipient_id, videos):
     
     call_send_api(message_data)
 
+def convert_video_to_mp4(input_path, output_path=None):
+    """
+    Convertit une vidéo en format MP4 compatible avec Messenger
+    
+    Args:
+        input_path: Chemin de la vidéo d'entrée
+        output_path: Chemin de sortie (optionnel)
+        
+    Returns:
+        Chemin de la vidéo convertie ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Conversion de la vidéo: {input_path}")
+        
+        if not os.path.exists(input_path):
+            logger.error(f"Le fichier d'entrée n'existe pas: {input_path}")
+            return None
+        
+        # Si aucun chemin de sortie n'est spécifié, créer un fichier temporaire
+        if not output_path:
+            output_dir = os.path.dirname(input_path)
+            output_filename = f"converted_{os.path.basename(input_path)}"
+            output_path = os.path.join(output_dir, output_filename)
+        
+        # Utiliser ffmpeg pour convertir la vidéo
+        command = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',  # Codec vidéo H.264
+            '-c:a', 'aac',      # Codec audio AAC
+            '-strict', 'experimental',
+            '-b:v', '1M',       # Bitrate vidéo 1 Mbps
+            '-b:a', '128k',     # Bitrate audio 128 kbps
+            '-vf', 'scale=640:-2',  # Redimensionner à 640px de large
+            '-f', 'mp4',        # Format de sortie MP4
+            '-movflags', '+faststart',  # Optimiser pour le streaming
+            '-y',               # Écraser le fichier de sortie s'il existe
+            output_path
+        ]
+        
+        logger.info(f"Exécution de la commande: {' '.join(command)}")
+        
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"Erreur lors de la conversion de la vidéo: {stderr}")
+            return None
+        
+        # Vérifier si le fichier de sortie existe et a une taille non nulle
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.error(f"Le fichier de sortie n'existe pas ou est vide: {output_path}")
+            return None
+        
+        logger.info(f"Vidéo convertie avec succès: {output_path}")
+        return output_path
+    except Exception as e:
+        logger.error(f"Erreur lors de la conversion de la vidéo: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 def handle_download_callback(recipient_id, video_id, title, result):
     """
     Callback pour le téléchargement d'une vidéo
@@ -244,11 +312,21 @@ def handle_download_callback(recipient_id, video_id, title, result):
         
         logger.info(f"Vidéo téléchargée avec succès: {result}")
         
+        # Convertir la vidéo en format MP4 compatible
+        converted_path = convert_video_to_mp4(result)
+        
+        if not converted_path:
+            logger.error("Échec de la conversion de la vidéo")
+            send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+            return
+        
+        logger.info(f"Vidéo convertie avec succès: {converted_path}")
+        
         # Essayer d'envoyer directement le fichier
         try:
-            logger.info(f"Tentative d'envoi direct du fichier: {result}")
+            logger.info(f"Tentative d'envoi direct du fichier: {converted_path}")
             send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-            send_file_response = send_file_attachment(recipient_id, result, "video")
+            send_file_response = send_file_attachment(recipient_id, converted_path, "video")
             
             if send_file_response:
                 logger.info(f"Fichier envoyé avec succès directement: {send_file_response}")
@@ -274,14 +352,25 @@ def handle_download_callback(recipient_id, video_id, title, result):
                 except Exception as e:
                     logger.error(f"Erreur lors de la sauvegarde dans la base de données: {str(e)}")
                 
-                # Nettoyer le répertoire temporaire
+                # Nettoyer les fichiers temporaires
                 try:
+                    # Supprimer le fichier original
+                    if os.path.exists(result) and result != converted_path:
+                        os.remove(result)
+                        logger.info(f"Fichier original supprimé: {result}")
+                    
+                    # Supprimer le fichier converti
+                    if os.path.exists(converted_path):
+                        os.remove(converted_path)
+                        logger.info(f"Fichier converti supprimé: {converted_path}")
+                    
+                    # Supprimer le répertoire temporaire
                     temp_dir = os.path.dirname(result)
                     if temp_dir.startswith('/tmp/tmp'):
                         shutil.rmtree(temp_dir)
-                        logger.info(f"Répertoire temporaire nettoyé : {temp_dir}")
+                        logger.info(f"Répertoire temporaire nettoyé: {temp_dir}")
                 except Exception as e:
-                    logger.error(f"Erreur lors du nettoyage du répertoire temporaire: {str(e)}")
+                    logger.error(f"Erreur lors du nettoyage des fichiers temporaires: {str(e)}")
                 
                 return
         except Exception as e:
@@ -290,19 +379,25 @@ def handle_download_callback(recipient_id, video_id, title, result):
         
         # Si l'envoi direct échoue, essayer Cloudinary
         try:
-            logger.info(f"Tentative de téléchargement sur Cloudinary: {result}")
+            logger.info(f"Tentative de téléchargement sur Cloudinary: {converted_path}")
             
             # Vérifier que le fichier existe et a une taille non nulle
-            if not os.path.exists(result) or os.path.getsize(result) == 0:
-                logger.error(f"Fichier invalide pour Cloudinary: {result}, taille: {os.path.getsize(result) if os.path.exists(result) else 'N/A'}")
-                raise Exception(f"Fichier invalide pour Cloudinary: {result}")
+            if not os.path.exists(converted_path) or os.path.getsize(converted_path) == 0:
+                logger.error(f"Fichier invalide pour Cloudinary: {converted_path}, taille: {os.path.getsize(converted_path) if os.path.exists(converted_path) else 'N/A'}")
+                raise Exception(f"Fichier invalide pour Cloudinary: {converted_path}")
             
             # Forcer le type de ressource vidéo
-            cloudinary_result = upload_file(result, f"youtube_{video_id}", "video")
+            cloudinary_result = upload_file(converted_path, f"youtube_{video_id}", "video")
             
             if not cloudinary_result or not cloudinary_result.get('secure_url'):
                 logger.error("Échec du téléchargement sur Cloudinary")
-                raise Exception("Échec du téléchargement sur Cloudinary")
+                
+                # Essayer avec le type auto
+                cloudinary_result = upload_file(converted_path, f"youtube_{video_id}", "auto")
+                
+                if not cloudinary_result or not cloudinary_result.get('secure_url'):
+                    logger.error("Échec du téléchargement sur Cloudinary avec le type auto")
+                    raise Exception("Échec du téléchargement sur Cloudinary")
                 
             video_url = cloudinary_result.get('secure_url')
             logger.info(f"Vidéo téléchargée sur Cloudinary: {video_url}")
@@ -311,10 +406,34 @@ def handle_download_callback(recipient_id, video_id, title, result):
             is_video_url = "video/upload" in video_url
             is_raw_url = "raw/upload" in video_url
             
-            # Si c'est une URL raw, envoyer directement le lien YouTube
+            # Si c'est une URL raw, essayer d'envoyer le lien Cloudinary directement
             if is_raw_url:
-                logger.warning("URL Cloudinary de type 'raw', envoi du lien YouTube à la place")
-                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                logger.warning("URL Cloudinary de type 'raw', tentative d'envoi direct du lien Cloudinary")
+                
+                # Essayer d'envoyer le lien comme une URL
+                message_data = {
+                    "recipient": {
+                        "id": recipient_id
+                    },
+                    "message": {
+                        "attachment": {
+                            "type": "file",
+                            "payload": {
+                                "url": video_url
+                            }
+                        }
+                    }
+                }
+                
+                response = call_send_api(message_data)
+                
+                if not response:
+                    logger.error("Échec de l'envoi du lien Cloudinary comme fichier")
+                    send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                    return
+                
+                logger.info("Lien Cloudinary envoyé avec succès comme fichier")
+                send_text_message(recipient_id, f"Voici votre vidéo : {title}")
                 return
             
             # Sauvegarder l'URL dans la base de données pour une utilisation future
@@ -355,14 +474,25 @@ def handle_download_callback(recipient_id, video_id, title, result):
             send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
             send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
         
-        # Nettoyer le répertoire temporaire
+        # Nettoyer les fichiers temporaires
         try:
+            # Supprimer le fichier original
+            if os.path.exists(result) and result != converted_path:
+                os.remove(result)
+                logger.info(f"Fichier original supprimé: {result}")
+            
+            # Supprimer le fichier converti
+            if os.path.exists(converted_path):
+                os.remove(converted_path)
+                logger.info(f"Fichier converti supprimé: {converted_path}")
+            
+            # Supprimer le répertoire temporaire
             temp_dir = os.path.dirname(result)
             if temp_dir.startswith('/tmp/tmp'):
                 shutil.rmtree(temp_dir)
-                logger.info(f"Répertoire temporaire nettoyé : {temp_dir}")
+                logger.info(f"Répertoire temporaire nettoyé: {temp_dir}")
         except Exception as e:
-            logger.error(f"Erreur lors du nettoyage du répertoire temporaire: {str(e)}")
+            logger.error(f"Erreur lors du nettoyage des fichiers temporaires: {str(e)}")
             
     except Exception as e:
         logger.error(f"Erreur dans le callback de téléchargement: {str(e)}")
@@ -467,23 +597,39 @@ def send_video_message(recipient_id, video_url):
     
     # Vérifier si l'URL est une URL raw de Cloudinary
     if "raw/upload" in video_url:
-        logger.warning("URL Cloudinary de type 'raw' détectée, impossible d'envoyer via Messenger")
-        return None
-    
-    message_data = {
-        "recipient": {
-            "id": recipient_id
-        },
-        "message": {
-            "attachment": {
-                "type": "video",
-                "payload": {
-                    "url": video_url,
-                    "is_reusable": True
+        logger.warning("URL Cloudinary de type 'raw' détectée, tentative d'envoi comme fichier")
+        
+        # Essayer d'envoyer comme fichier
+        message_data = {
+            "recipient": {
+                "id": recipient_id
+            },
+            "message": {
+                "attachment": {
+                    "type": "file",
+                    "payload": {
+                        "url": video_url,
+                        "is_reusable": True
+                    }
                 }
             }
         }
-    }
+    else:
+        # Envoyer comme vidéo
+        message_data = {
+            "recipient": {
+                "id": recipient_id
+            },
+            "message": {
+                "attachment": {
+                    "type": "video",
+                    "payload": {
+                        "url": video_url,
+                        "is_reusable": True
+                    }
+                }
+            }
+        }
     
     response = call_send_api(message_data)
     logger.info(f"Réponse de l'API pour l'envoi de vidéo: {json.dumps(response) if response else 'None'}")
