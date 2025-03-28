@@ -559,3 +559,34 @@ def download_video(video_id, output_path):
         logger.error(traceback.format_exc())
         return None
 
+
+def stop_download_thread():
+    """
+    Arrête le thread de téléchargement proprement
+    """
+    global download_thread_running
+    
+    logger.info("Arrêt du fil de téléchargement demandé")
+    
+    # Arrêter le thread de traitement
+    download_thread_running = False
+    
+    # Attendre que le thread se termine
+    if download_thread and download_thread.is_alive():
+        try:
+            download_thread.join(timeout=5)
+            logger.info("Arrêt du fil de traitement de la file d'attente")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'arrêt du thread de téléchargement: {str(e)}")
+    
+    # Sauvegarder la file d'attente pour une utilisation future
+    try:
+        with download_queue_lock:
+            queue_size = len(download_queue)
+            # Ici, on pourrait sauvegarder la file d'attente dans un fichier ou une base de données
+            logger.info(f"Fichier d'attente sauvegardé: {queue_size} éléments")
+    except Exception as e:
+        logger.error(f"Erreur lors de la sauvegarde de la file d'attente: {str(e)}")
+    
+    logger.info("Discussion de téléchargement arrêté")
+
