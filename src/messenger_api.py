@@ -10,7 +10,7 @@ from src.utils.logger import get_logger
 from src.mistral_api import generate_mistral_response
 from src.conversation_memory import clear_user_history
 from src.youtube_api import search_youtube, download_youtube_video
-from src.cloudinary_service import upload_file
+from src.cloudinary_service import upload_file, delete_file
 
 logger = get_logger(__name__)
 
@@ -53,6 +53,23 @@ def handle_message(sender_id, message_data):
                 # Commande pour effacer l'historique de conversation
                 clear_user_history(sender_id)
                 send_text_message(sender_id, "Votre historique de conversation a été effacé. Je ne me souviens plus de nos échanges précédents.")
+            elif text.startswith('/retry '):
+                # Commande pour réessayer le téléchargement d'une vidéo
+                video_id = text.split(' ')[1].strip()
+                if video_id:
+                    logger.info(f"Commande de réessai pour la vidéo: {video_id}")
+                    # Supprimer l'entrée de la base de données
+                    delete_video_from_db(video_id)
+                    # Récupérer les détails de la vidéo
+                    from src.youtube_api import get_video_details
+                    video_details = get_video_details(video_id)
+                    if video_details:
+                        title = video_details.get('title', 'Vidéo YouTube')
+                        handle_watch_video(sender_id, video_id, title, force_download=True)
+                    else:
+                        send_text_message(sender_id, f"Désolé, je n'ai pas pu récupérer les détails de la vidéo {video_id}.")
+                else:
+                    send_text_message(sender_id, "Format incorrect. Utilisez /retry VIDEO_ID")
             elif sender_id in user_states and user_states[sender_id] == 'youtube':
                 logger.info(f"Recherche YouTube pour: {message_data['text']}")
                 try:
@@ -96,6 +113,47 @@ def handle_message(sender_id, message_data):
         send_text_message(sender_id, error_message)
     
     logger.info("Fin de handle_message")
+
+def delete_video_from_db(video_id):
+    """
+    Supprime une vidéo de la base de données
+    
+    Args:
+        video_id: ID de la vidéo YouTube à supprimer
+    """
+    try:
+        from src.database import get_database
+        db = get_database()
+        
+        if db is not None:
+            # Récupérer l'entrée existante
+            video_collection = db.videos
+            existing_video = video_collection.find_one({"video_id": video_id})
+            
+            if existing_video:
+                # Si la vidéo a une URL Cloudinary, essayer de la supprimer de Cloudinary
+                cloudinary_url = existing_video.get('cloudinary_url')
+                if cloudinary_url:
+                    try:
+                        # Déterminer le type de ressource
+                        resource_type = "video"
+                        if "raw/upload" in cloudinary_url:
+                            resource_type = "raw"
+                        
+                        # Supprimer de Cloudinary
+                        public_id = f"youtube_{video_id}"
+                        delete_file(public_id, resource_type)
+                    except Exception as e:
+                        logger.error(f"Erreur lors de la suppression de Cloudinary: {str(e)}")
+                
+                # Supprimer de la base de données
+                result = video_collection.delete_one({"video_id": video_id})
+                logger.info(f"Vidéo supprimée de la base de données: {video_id}, résultat: {result.deleted_count}")
+            else:
+                logger.info(f"Aucune vidéo trouvée dans la base de données pour l'ID: {video_id}")
+    except Exception as e:
+        logger.error(f"Erreur lors de la suppression de la vidéo de la base de données: {str(e)}")
+        logger.error(traceback.format_exc())
 
 def send_youtube_results(recipient_id, videos):
     """
@@ -239,22 +297,12 @@ def handle_download_callback(recipient_id, video_id, title, result):
                 logger.error(f"Fichier invalide pour Cloudinary: {result}, taille: {os.path.getsize(result) if os.path.exists(result) else 'N/A'}")
                 raise Exception(f"Fichier invalide pour Cloudinary: {result}")
             
-            # Essayer d'abord avec le type de ressource vidéo
+            # Forcer le type de ressource vidéo
             cloudinary_result = upload_file(result, f"youtube_{video_id}", "video")
             
-            # Si cela échoue, essayer avec auto
-            if not cloudinary_result:
-                logger.warning("Échec avec le type 'video', tentative avec 'auto'")
-                cloudinary_result = upload_file(result, f"youtube_{video_id}", "auto")
-            
-            # Si cela échoue encore, essayer avec raw
-            if not cloudinary_result:
-                logger.warning("Échec avec le type 'auto', tentative avec 'raw'")
-                cloudinary_result = upload_file(result, f"youtube_{video_id}", "raw")
-            
             if not cloudinary_result or not cloudinary_result.get('secure_url'):
-                logger.error("Toutes les tentatives de téléchargement sur Cloudinary ont échoué")
-                raise Exception("Échec du téléchargement sur Cloudinary après plusieurs tentatives")
+                logger.error("Échec du téléchargement sur Cloudinary")
+                raise Exception("Échec du téléchargement sur Cloudinary")
                 
             video_url = cloudinary_result.get('secure_url')
             logger.info(f"Vidéo téléchargée sur Cloudinary: {video_url}")
@@ -262,6 +310,12 @@ def handle_download_callback(recipient_id, video_id, title, result):
             # Vérifier si l'URL est une URL vidéo ou raw
             is_video_url = "video/upload" in video_url
             is_raw_url = "raw/upload" in video_url
+            
+            # Si c'est une URL raw, envoyer directement le lien YouTube
+            if is_raw_url:
+                logger.warning("URL Cloudinary de type 'raw', envoi du lien YouTube à la place")
+                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                return
             
             # Sauvegarder l'URL dans la base de données pour une utilisation future
             from src.database import get_database
@@ -283,12 +337,6 @@ def handle_download_callback(recipient_id, video_id, title, result):
                 )
                 logger.info(f"Vidéo sauvegardée dans la base de données: {video_id}")
             
-            # Si c'est une URL raw, envoyer directement le lien YouTube
-            if is_raw_url:
-                logger.warning("URL Cloudinary de type 'raw', envoi du lien YouTube à la place")
-                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
-                return
-            
             # Envoyer la vidéo à l'utilisateur
             send_text_message(recipient_id, f"Voici votre vidéo : {title}")
             send_video_response = send_video_message(recipient_id, video_url)
@@ -297,6 +345,7 @@ def handle_download_callback(recipient_id, video_id, title, result):
                 logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary")
                 # Envoyer le lien YouTube comme solution de secours
                 send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
             
         except Exception as e:
             logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
@@ -304,6 +353,7 @@ def handle_download_callback(recipient_id, video_id, title, result):
             
             # Envoyer le lien YouTube comme solution de secours
             send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+            send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
         
         # Nettoyer le répertoire temporaire
         try:
@@ -318,10 +368,17 @@ def handle_download_callback(recipient_id, video_id, title, result):
         logger.error(f"Erreur dans le callback de téléchargement: {str(e)}")
         logger.error(traceback.format_exc())
         send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+        send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
 
-def handle_watch_video(recipient_id, video_id, title):
+def handle_watch_video(recipient_id, video_id, title, force_download=False):
     """
     Télécharge et envoie la vidéo YouTube
+    
+    Args:
+        recipient_id: ID du destinataire
+        video_id: ID de la vidéo YouTube
+        title: Titre de la vidéo
+        force_download: Si True, force le téléchargement même si la vidéo existe déjà
     """
     try:
         # Vérifier si le video_id est valide
@@ -332,11 +389,15 @@ def handle_watch_video(recipient_id, video_id, title):
         # Informer l'utilisateur que le téléchargement est en cours
         send_text_message(recipient_id, "Préparation de la vidéo en cours... Cela peut prendre quelques instants.")
         
+        # Si force_download est True, supprimer l'entrée existante
+        if force_download:
+            delete_video_from_db(video_id)
+        
         # Vérifier d'abord dans la base de données MongoDB si la vidéo a déjà été téléchargée
         from src.database import get_database
         db = get_database()
         
-        if db is not None:
+        if not force_download and db is not None:
             # Vérifier si la vidéo existe déjà
             video_collection = db.videos
             existing_video = video_collection.find_one({"video_id": video_id})
@@ -349,18 +410,18 @@ def handle_watch_video(recipient_id, video_id, title):
                 cloudinary_url = existing_video.get('cloudinary_url')
                 
                 if is_raw_url or (cloudinary_url and "raw/upload" in cloudinary_url):
-                    logger.warning("URL Cloudinary de type 'raw' trouvée dans la base de données, envoi du lien YouTube à la place")
-                    send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
-                    return
-                
-                if cloudinary_url:
-                    send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-                    send_video_response = send_video_message(recipient_id, cloudinary_url)
-                    
-                    if not send_video_response:
-                        logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary stockée")
-                        send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
-                    return
+                    logger.warning("URL Cloudinary de type 'raw' trouvée dans la base de données, suppression et nouveau téléchargement")
+                    delete_video_from_db(video_id)
+                else:
+                    if cloudinary_url:
+                        send_text_message(recipient_id, f"Voici votre vidéo : {title}")
+                        send_video_response = send_video_message(recipient_id, cloudinary_url)
+                        
+                        if not send_video_response:
+                            logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary stockée")
+                            send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                            send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
+                        return
         
         # Initialiser le dictionnaire des téléchargements en cours pour cet utilisateur
         if recipient_id not in pending_downloads:
@@ -389,6 +450,7 @@ def handle_watch_video(recipient_id, video_id, title):
         logger.error(f"Erreur lors du traitement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
         send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+        send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
 
 def send_video_message(recipient_id, video_url):
     """
