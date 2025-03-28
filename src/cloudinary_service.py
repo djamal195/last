@@ -51,15 +51,6 @@ def _validate_file(file_path):
     
     logger.info(f"Type MIME du fichier: {mime_type}")
     
-    # Vérifier si c'est un type de fichier supporté par Cloudinary
-    supported_types = [
-        'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-ms-wmv', 'video/x-flv',
-        'image/jpeg', 'image/png', 'image/gif', 'image/webp'
-    ]
-    
-    if mime_type not in supported_types:
-        return False, f"Type de fichier non supporté: {mime_type}"
-    
     return True, mime_type
 
 def upload_file(file_path, public_id=None, resource_type="auto"):
@@ -146,3 +137,33 @@ def upload_file(file_path, public_id=None, resource_type="auto"):
         logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
+
+def delete_file(public_id, resource_type="auto"):
+    """
+    Supprime un fichier de Cloudinary
+    
+    Args:
+        public_id: ID public du fichier à supprimer
+        resource_type: Type de ressource (auto, image, video, raw)
+        
+    Returns:
+        Résultat de la suppression
+    """
+    try:
+        logger.info(f"Suppression du fichier {public_id} de Cloudinary")
+        
+        # Vérifier si les informations d'identification sont configurées
+        if not os.environ.get("CLOUDINARY_CLOUD_NAME") or not os.environ.get("CLOUDINARY_API_KEY") or not os.environ.get("CLOUDINARY_API_SECRET"):
+            logger.error("Informations d'identification Cloudinary manquantes")
+            return None
+        
+        # Supprimer le fichier
+        result = cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+        
+        logger.info(f"Résultat de la suppression: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Erreur lors de la suppression du fichier: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return None
+
