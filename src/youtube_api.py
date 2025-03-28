@@ -1,1145 +1,319 @@
 import os
-import json
-import requests
-import traceback
 import re
 import time
-import random
+import json
 import threading
-import queue
-import signal
-import atexit
+import traceback
 import subprocess
-from typing import List, Dict, Optional, Any, Tuple
-import logging
 import tempfile
-import shutil
-import uuid
-import hashlib
-from urllib.parse import parse_qs, urlparse
-
-# Configuration du logger
+from typing import Dict, Any, List, Optional, Callable
+from urllib.parse import urlparse, parse_qs
+import requests
 from src.utils.logger import get_logger
+
 logger = get_logger(__name__)
 
-# Expression régulière pour valider les ID de vidéos YouTube
-YOUTUBE_VIDEO_ID_REGEX = re.compile(r'^[0-9A-Za-z_-]{11}$')
+# Nombre maximum de téléchargements simultanés
+MAX_CONCURRENT_DOWNLOADS = 3
 
-# Configuration du rate limiting
-MAX_RETRIES = 3
-INITIAL_BACKOFF = 5  # secondes
-MAX_BACKOFF = 120  # secondes
-MIN_REQUEST_INTERVAL = 10.0  # secondes entre les requêtes
+# Verrou pour limiter les téléchargements simultanés
+download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
-# Cache simple pour les vidéos téléchargées
-VIDEO_CACHE = {}
-CACHE_DIR = os.path.join(tempfile.gettempdir(), 'youtube_cache')
-os.makedirs(CACHE_DIR, exist_ok=True)
+# File d'attente des téléchargements
+download_queue = []
+download_queue_lock = threading.Lock()
 
-# Compteur global de requêtes pour limiter le nombre total
-REQUEST_COUNT = 0
-MAX_REQUESTS_PER_HOUR = 10
-
-# Heure de la dernière réinitialisation du compteur
-LAST_RESET_TIME = time.time()
-
-# File d'attente pour les téléchargements
-download_queue = queue.Queue()
-MAX_CONCURRENT_DOWNLOADS = 2
-current_downloads = 0
-download_lock = threading.Lock()
-
-# Flag pour indiquer si le thread de téléchargement doit s'arrêter
-should_stop = False
-
-# Flag pour indiquer si le thread de téléchargement est en cours d'exécution
+# Thread de traitement de la file d'attente
+download_thread = None
 download_thread_running = False
 
-# Thread de téléchargement
-download_thread = None
+# Répertoire de cache pour les vidéos téléchargées
+CACHE_DIR = "/tmp/youtube_cache"
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
 
-# Sauvegarde de la file d'attente pour la persistance
-QUEUE_BACKUP_FILE = os.path.join(tempfile.gettempdir(), 'youtube_queue_backup.json')
-
-def _check_rate_limit():
+def extract_video_id(url_or_id):
     """
-    Vérifie si nous avons dépassé la limite de requêtes
+    Extrait l'ID de la vidéo YouTube à partir d'une URL ou d'un ID
     
+    Args:
+        url_or_id: URL YouTube ou ID de la vidéo
+        
     Returns:
-        True si nous pouvons faire une requête, False sinon
+        ID de la vidéo ou None si non trouvé
     """
-    global REQUEST_COUNT, LAST_RESET_TIME
-    
-    current_time = time.time()
-    
-    # Réinitialiser le compteur toutes les heures
-    if current_time - LAST_RESET_TIME > 3600:
-        logger.info("Réinitialisation du compteur de requêtes")
-        REQUEST_COUNT = 0
-        LAST_RESET_TIME = current_time
-    
-    # Vérifier si nous avons dépassé la limite
-    if REQUEST_COUNT >= MAX_REQUESTS_PER_HOUR:
-        logger.warning(f"Limite de requêtes atteinte ({MAX_REQUESTS_PER_HOUR} par heure)")
-        return False
-    
-    # Incrémenter le compteur
-    REQUEST_COUNT += 1
-    return True
-
-class YouTubeAPI:
-    """
-    Classe pour interagir avec l'API YouTube
-    """
-    
-    def __init__(self):
-        """
-        Initialise l'API YouTube avec la clé API depuis les variables d'environnement
-        """
-        self.api_key = os.environ.get('YOUTUBE_API_KEY')
-        if not self.api_key:
-            logger.error("Clé API YouTube manquante dans les variables d'environnement")
+    try:
+        logger.info(f"Extraction de l'ID vidéo à partir de: {url_or_id}")
         
-        self.base_url = "https://www.googleapis.com/youtube/v3"
-        self.last_request_time = 0
-        self.min_request_interval = MIN_REQUEST_INTERVAL
-    
-    def _rate_limit_request(self):
-        """
-        Applique une limitation de débit pour éviter les erreurs 429
-        """
-        if not _check_rate_limit():
-            raise Exception("Limite de requêtes atteinte")
-            
-        current_time = time.time()
-        time_since_last_request = current_time - self.last_request_time
+        # Si c'est déjà un ID (pas d'URL)
+        if re.match(r'^[a-zA-Z0-9_-]{11}$', url_or_id):
+            logger.info(f"ID vidéo déjà extrait: {url_or_id}")
+            return url_or_id
         
-        if time_since_last_request < self.min_request_interval:
-            sleep_time = self.min_request_interval - time_since_last_request
-            logger.info(f"Rate limiting: attente de {sleep_time:.2f} secondes")
-            time.sleep(sleep_time)
-            
-        self.last_request_time = time.time()
-    
-    def _make_request_with_retry(self, url, params=None, method='get'):
-        """
-        Effectue une requête HTTP avec retry et backoff exponentiel
+        # Essayer d'extraire l'ID à partir de différents formats d'URL YouTube
+        youtube_regex = (
+            r'(https?://)?(www\.)?'
+            '(youtube|youtu|youtube-nocookie)\.(com|be)/'
+            '(watch\?v=|embed/|v/|.+\?v=)?([a-zA-Z0-9_-]{11})'
+        )
         
-        Args:
-            url: URL de la requête
-            params: Paramètres de la requête
-            method: Méthode HTTP (get, post, etc.)
-            
-        Returns:
-            Réponse de la requête ou None en cas d'erreur
-        """
-        retry_count = 0
-        backoff = INITIAL_BACKOFF
+        match = re.match(youtube_regex, url_or_id)
         
-        while retry_count <= MAX_RETRIES:
-            try:
-                # Appliquer la limitation de débit
-                self._rate_limit_request()
-                
-                # Effectuer la requête
-                if method.lower() == 'get':
-                    response = requests.get(url, params=params, timeout=30)
-                else:
-                    response = requests.post(url, json=params, timeout=30)
-                
-                # Vérifier si la requête a réussi
-                response.raise_for_status()
-                return response
-                
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    retry_count += 1
-                    
-                    if retry_count > MAX_RETRIES:
-                        logger.error(f"Nombre maximum de tentatives atteint après erreur 429")
-                        raise
-                        
-                    # Calculer le temps d'attente avec jitter
-                    jitter = random.uniform(0, 0.1 * backoff)
-                    wait_time = backoff + jitter
-                    
-                    logger.warning(f"Erreur 429 (Too Many Requests). Attente de {wait_time:.2f} secondes avant nouvelle tentative ({retry_count}/{MAX_RETRIES})")
-                    time.sleep(wait_time)
-                    
-                    # Augmenter le backoff pour la prochaine tentative
-                    backoff = min(backoff * 2, MAX_BACKOFF)
-                else:
-                    # Autres erreurs HTTP
-                    logger.error(f"Erreur HTTP {e.response.status_code}: {str(e)}")
-                    raise
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Erreur de requête: {str(e)}")
-                raise
-    
-    def search_videos(self, query: str, max_results: int = 5) -> Optional[List[Dict[str, Any]]]:
-        """
-        Recherche des vidéos YouTube en fonction d'une requête
+        if match:
+            video_id = match.group(6)
+            logger.info(f"ID vidéo extrait: {video_id}")
+            return video_id
         
-        Args:
-            query: Terme de recherche
-            max_results: Nombre maximum de résultats à retourner
+        # Essayer d'extraire l'ID à partir des paramètres de l'URL
+        parsed_url = urlparse(url_or_id)
+        if parsed_url.netloc in ['youtube.com', 'www.youtube.com', 'youtu.be']:
+            if parsed_url.netloc == 'youtu.be':
+                video_id = parsed_url.path.lstrip('/')
+                logger.info(f"ID vidéo extrait de youtu.be: {video_id}")
+                return video_id
             
-        Returns:
-            Liste de vidéos ou None en cas d'erreur
-        """
-        if not self.api_key:
-            logger.error("Impossible de rechercher des vidéos: clé API manquante")
-            return None
-            
-        try:
-            logger.info(f"Recherche YouTube pour: {query}")
-            
-            # Construire l'URL de recherche
-            search_url = f"{self.base_url}/search"
-            params = {
-                "part": "snippet",
-                "q": query,
-                "maxResults": max_results,
-                "type": "video",  # Spécifier explicitement que nous voulons uniquement des vidéos
-                "key": self.api_key
-            }
-            
-            # Effectuer la requête avec retry
-            try:
-                response = self._make_request_with_retry(search_url, params=params)
-            except Exception as e:
-                logger.error(f"Erreur lors de la requête de recherche: {str(e)}")
-                return None
-            
-            # Analyser la réponse
-            data = response.json()
-            
-            # Vérifier si des résultats ont été trouvés
-            if 'items' not in data or not data['items']:
-                logger.warning(f"Aucun résultat trouvé pour la recherche: {query}")
-                return []
-            
-            # Extraire les informations des vidéos
-            videos = []
-            for i, item in enumerate(data['items']):
-                try:
-                    # Vérifier si c'est une vidéo ou un autre type d'élément
-                    if 'id' not in item:
-                        logger.warning(f"Élément sans 'id': {item}")
-                        continue
-                    
-                    # Vérifier le type d'élément
-                    if isinstance(item['id'], dict):
-                        if 'kind' in item['id'] and item['id']['kind'] != 'youtube#video':
-                            logger.warning(f"Élément ignoré car ce n'est pas une vidéo: {item['id']['kind']}")
-                            continue
-                        
-                        if 'videoId' not in item['id']:
-                            logger.warning(f"Clé 'videoId' manquante dans item['id']: {item['id']}")
-                            continue
-                        
-                        video_id = item['id']['videoId']
-                    elif isinstance(item['id'], str):
-                        video_id = item['id']
-                    else:
-                        logger.warning(f"Format d'ID non reconnu: {type(item['id'])}")
-                        continue
-                    
-                    # Valider l'ID de la vidéo
-                    if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
-                        logger.warning(f"ID de vidéo invalide: {video_id}")
-                        continue
-                    
-                    # Extraire les autres informations avec vérification
-                    snippet = item.get('snippet', {})
-                    title = snippet.get('title', 'Titre non disponible')
-                    description = snippet.get('description', 'Description non disponible')
-                    
-                    # Extraire la miniature avec vérification
-                    thumbnails = snippet.get('thumbnails', {})
-                    thumbnail_url = None
-                    
-                    # Essayer d'obtenir la miniature de haute qualité, puis moyenne, puis par défaut
-                    for quality in ['high', 'medium', 'default']:
-                        if quality in thumbnails and 'url' in thumbnails[quality]:
-                            thumbnail_url = thumbnails[quality]['url']
-                            break
-                    
-                    if not thumbnail_url:
-                        thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"  # URL basée sur l'ID
-                    
-                    # Créer un objet vidéo avec l'ID explicitement défini
-                    video = {
-                        'id': video_id,
-                        'videoId': video_id,  # Ajouter explicitement videoId pour la compatibilité
-                        'title': title,
-                        'description': description,
-                        'thumbnail': thumbnail_url,
-                        'url': f"https://www.youtube.com/watch?v={video_id}"
-                    }
-                    
-                    videos.append(video)
-                    
-                except Exception as e:
-                    logger.error(f"Erreur lors de l'extraction des informations de la vidéo: {str(e)}")
-                    logger.error(f"Traceback: {traceback.format_exc()}")
-                    continue
-            
-            logger.info(f"Recherche YouTube réussie: {len(videos)} vidéos trouvées")
-            return videos
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Erreur de requête lors de la recherche YouTube: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"Erreur de décodage JSON lors de la recherche YouTube: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
-        except Exception as e:
-            logger.error(f"Erreur inattendue lors de la recherche YouTube: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
-    
-    def get_video_details(self, video_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Obtient les détails d'une vidéo YouTube spécifique
+            query_params = parse_qs(parsed_url.query)
+            if 'v' in query_params:
+                video_id = query_params['v'][0]
+                logger.info(f"ID vidéo extrait des paramètres de requête: {video_id}")
+                return video_id
         
-        Args:
-            video_id: ID de la vidéo YouTube
-            
-        Returns:
-            Détails de la vidéo ou None en cas d'erreur
-        """
-        # Valider l'ID de la vidéo
-        if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
-            logger.error(f"ID de vidéo invalide: {video_id}")
-            return None
-            
-        if not self.api_key:
-            logger.error("Impossible d'obtenir les détails de la vidéo: clé API manquante")
-            return None
-            
-        try:
-            logger.info(f"Récupération des détails pour la vidéo: {video_id}")
-            
-            # Construire l'URL pour les détails de la vidéo
-            video_url = f"{self.base_url}/videos"
-            params = {
-                "part": "snippet,contentDetails,statistics",
-                "id": video_id,
-                "key": self.api_key
-            }
-            
-            # Effectuer la requête avec retry
-            try:
-                response = self._make_request_with_retry(video_url, params=params)
-            except Exception as e:
-                logger.error(f"Erreur lors de la requête de détails: {str(e)}")
-                return None
-            
-            # Analyser la réponse
-            data = response.json()
-            
-            # Vérifier si des résultats ont été trouvés
-            if 'items' not in data or not data['items']:
-                logger.warning(f"Aucun détail trouvé pour la vidéo: {video_id}")
-                return None
-            
-            # Extraire les détails de la vidéo
-            video_data = data['items'][0]
-            snippet = video_data.get('snippet', {})
-            content_details = video_data.get('contentDetails', {})
-            statistics = video_data.get('statistics', {})
-            
-            # Construire l'objet de détails
-            video_details = {
-                'id': video_id,
-                'videoId': video_id,  # Ajouter explicitement videoId pour la compatibilité
-                'title': snippet.get('title', 'Titre non disponible'),
-                'description': snippet.get('description', 'Description non disponible'),
-                'publishedAt': snippet.get('publishedAt', ''),
-                'channelTitle': snippet.get('channelTitle', 'Chaîne inconnue'),
-                'duration': content_details.get('duration', ''),
-                'viewCount': statistics.get('viewCount', '0'),
-                'likeCount': statistics.get('likeCount', '0'),
-                'commentCount': statistics.get('commentCount', '0'),
-                'url': f"https://www.youtube.com/watch?v={video_id}"
-            }
-            
-            # Extraire la miniature avec vérification
-            thumbnails = snippet.get('thumbnails', {})
-            for quality in ['high', 'medium', 'default']:
-                if quality in thumbnails and 'url' in thumbnails[quality]:
-                    video_details['thumbnail'] = thumbnails[quality]['url']
-                    break
-            
-            if 'thumbnail' not in video_details:
-                video_details['thumbnail'] = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-            
-            logger.info(f"Détails récupérés avec succès pour la vidéo: {video_id}")
-            return video_details
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Erreur de requête lors de la récupération des détails de la vidéo: {str(e)}")
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"Erreur de décodage JSON lors de la récupération des détails de la vidéo: {str(e)}")
-            return None
-        except Exception as e:
-            logger.error(f"Erreur inattendue lors de la récupération des détails de la vidéo: {str(e)}")
-            return None
-
-    def get_stream_url(self, video_id: str) -> Optional[str]:
-        """
-        Obtient l'URL de streaming d'une vidéo YouTube en utilisant l'API
-        
-        Args:
-            video_id: ID de la vidéo YouTube
-            
-        Returns:
-            URL de streaming ou None en cas d'erreur
-        """
-        # Valider l'ID de la vidéo
-        if not YOUTUBE_VIDEO_ID_REGEX.match(video_id):
-            logger.error(f"ID de vidéo invalide: {video_id}")
-            return None
-            
-        if not self.api_key:
-            logger.error("Impossible d'obtenir l'URL de streaming: clé API manquante")
-            return None
-            
-        try:
-            logger.info(f"Récupération de l'URL de streaming pour la vidéo: {video_id}")
-            
-            # Utiliser l'API YouTube pour obtenir les détails de la vidéo
-            video_details = self.get_video_details(video_id)
-            
-            if not video_details:
-                logger.warning(f"Aucun détail trouvé pour la vidéo: {video_id}")
-                return None
-            
-            # Construire l'URL de la vidéo
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # Utiliser youtube-dl ou yt-dlp pour obtenir l'URL de streaming
-            # Cela nécessite d'installer youtube-dl ou yt-dlp
-            # Pour l'instant, nous retournons simplement l'URL YouTube
-            
-            logger.info(f"URL de streaming obtenue pour la vidéo: {video_id}")
-            return video_url
-            
-        except Exception as e:
-            logger.error(f"Erreur lors de la récupération de l'URL de streaming: {str(e)}")
-            return None
-
-# Créer une instance de l'API pour une utilisation facile
-youtube_api = YouTubeAPI()
-
-# Fonctions d'aide pour maintenir la compatibilité avec le code existant
-def search_videos(query, max_results=5):
-    """
-    Fonction d'aide pour rechercher des vidéos YouTube
-    """
-    return youtube_api.search_videos(query, max_results)
+        logger.warning(f"Impossible d'extraire l'ID vidéo de: {url_or_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Erreur lors de l'extraction de l'ID vidéo: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
 
 def get_video_details(video_id):
     """
-    Fonction d'aide pour obtenir les détails d'une vidéo
-    """
-    return youtube_api.get_video_details(video_id)
-
-# Fonctions avec les noms originaux pour maintenir la compatibilité
-def search_youtube(query, max_results=5):
-    """
-    Fonction d'aide pour rechercher des vidéos YouTube (nom original)
+    Récupère les détails d'une vidéo YouTube
     
-    Cette fonction est conçue pour être compatible avec le code existant.
-    Elle s'assure que chaque vidéo dans les résultats a un champ 'videoId'.
+    Args:
+        video_id: ID de la vidéo YouTube
+        
+    Returns:
+        Dictionnaire contenant les détails de la vidéo
     """
     try:
-        logger.info(f"Appel de search_youtube avec query={query}, max_results={max_results}")
-        videos = search_videos(query, max_results)
+        logger.info(f"Récupération des détails de la vidéo: {video_id}")
         
-        if videos is None:
-            logger.warning("search_videos a retourné None")
+        # Vérifier si l'ID est valide
+        if not video_id or not re.match(r'^[a-zA-Z0-9_-]{11}$', video_id):
+            logger.warning(f"ID vidéo invalide: {video_id}")
             return None
-            
-        # S'assurer que chaque vidéo a un champ 'videoId'
-        for video in videos:
-            if 'id' in video and 'videoId' not in video:
-                video['videoId'] = video['id']
-                
-        logger.info(f"search_youtube a trouvé {len(videos)} vidéos")
-        return videos
-    except Exception as e:
-        logger.error(f"Erreur dans search_youtube: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return None
-
-def _is_valid_youtube_id(video_id):
-    """
-    Vérifie si un ID de vidéo YouTube est valide
-    
-    Args:
-        video_id: ID à vérifier
         
-    Returns:
-        True si l'ID est valide, False sinon
-    """
-    if not video_id or not isinstance(video_id, str):
-        return False
+        # Utiliser l'API YouTube Data pour récupérer les détails
+        api_key = os.environ.get('YOUTUBE_API_KEY')
         
-    # Les ID de vidéos YouTube sont généralement des chaînes de 11 caractères
-    # contenant des lettres, des chiffres, des tirets et des underscores
-    return bool(YOUTUBE_VIDEO_ID_REGEX.match(video_id))
-
-def _get_cache_path(video_id):
-    """
-    Obtient le chemin du fichier cache pour une vidéo
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        
-    Returns:
-        Chemin du fichier cache
-    """
-    return os.path.join(CACHE_DIR, f"{video_id}.mp4")
-
-def _is_in_cache(video_id):
-    """
-    Vérifie si une vidéo est dans le cache
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        
-    Returns:
-        True si la vidéo est dans le cache, False sinon
-    """
-    cache_path = _get_cache_path(video_id)
-    return os.path.exists(cache_path) and os.path.getsize(cache_path) > 0
-
-def _download_with_rapidapi(video_id, output_path):
-    """
-    Télécharge une vidéo YouTube en utilisant l'API RapidAPI
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin où enregistrer la vidéo
-        
-    Returns:
-        True si le téléchargement a réussi, False sinon
-    """
-    try:
-        import http.client
-        import json
-        import urllib.parse
-        
-        # URL YouTube complète
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        encoded_url = urllib.parse.quote(youtube_url)
-        
-        # Connexion à l'API RapidAPI
-        conn = http.client.HTTPSConnection("youtube-info-download-api.p.rapidapi.com")
-        
-        # En-têtes avec la clé API
-        headers = {
-            'x-rapidapi-key': os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208"),
-            'x-rapidapi-host': "youtube-info-download-api.p.rapidapi.com"
-        }
-        
-        # Requête à l'API
-        endpoint = f"/ajax/api.php?function=i&u={encoded_url}"
-        logger.info(f"Requête à RapidAPI: {endpoint}")
-        
-        conn.request("GET", endpoint, headers=headers)
-        
-        # Récupération de la réponse
-        res = conn.getresponse()
-        data = res.read().decode("utf-8")
-        
-        # Vérifier le code de statut
-        if res.status != 200:
-            logger.error(f"Erreur de l'API RapidAPI: {res.status} - {data}")
-            return False
-        
-        # Analyser la réponse JSON
-        try:
-            json_data = json.loads(data)
-            logger.info(f"Réponse de l'API RapidAPI reçue: {json.dumps(json_data)[:200]}...")
-        except json.JSONDecodeError:
-            logger.error(f"Réponse non-JSON reçue: {data[:200]}...")
-            return False
-        
-        # Vérifier si la réponse contient des informations
-        if not json_data or not json_data.get("successfull"):
-            logger.error("Réponse RapidAPI invalide ou échec")
-            return False
-        
-        # Essayer de parser les informations de la vidéo
-        try:
-            # La réponse contient un champ "info" qui peut être une chaîne JSON ou un dictionnaire
-            info = json_data.get("info", {})
-            
-            # Si info est une chaîne, la parser en JSON
-            if isinstance(info, str):
-                try:
-                    info = json.loads(info)
-                except json.JSONDecodeError:
-                    logger.error(f"Impossible de parser info comme JSON: {info[:200]}...")
-                    return False
-            
-            # Vérifier si des formats sont disponibles
-            formats = info.get("formats", [])
-            if not formats:
-                logger.error("Aucun format de vidéo trouvé dans la réponse")
-                return False
-            
-            # Trouver les formats MP4
-            mp4_formats = []
-            for fmt in formats:
-                if fmt.get("ext") == "mp4" and fmt.get("url"):
-                    mp4_formats.append(fmt)
-            
-            if not mp4_formats:
-                logger.error("Aucun format MP4 trouvé")
-                return False
-            
-            # Trier par qualité (résolution)
-            mp4_formats.sort(key=lambda x: int(x.get("height", 0)), reverse=True)
-            
-            # Prendre le format de meilleure qualité
-            best_format = mp4_formats[0]
-            download_url = best_format.get("url")
-            
-            if not download_url:
-                logger.error("URL de téléchargement non trouvée")
-                return False
-            
-            # Télécharger la vidéo
-            logger.info(f"Téléchargement de la vidéo depuis {download_url[:100]}...")
-            response = requests.get(download_url, stream=True, timeout=60)
-            
-            # Vérifier la réponse
-            if response.status_code != 200:
-                logger.error(f"Erreur lors du téléchargement: {response.status_code}")
-                return False
-            
-            # Enregistrer la vidéo
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            # Vérifier que le fichier a été téléchargé
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({os.path.getsize(output_path)} octets)")
-                return True
-            else:
-                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Erreur lors du traitement de la réponse RapidAPI: {str(e)}")
-            logger.error(traceback.format_exc())
-            return False
-            
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec RapidAPI: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
-
-def _download_with_yt_dlp(video_id, output_path):
-    """
-    Télécharge une vidéo YouTube en utilisant yt-dlp avec un fichier de cookies
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin où enregistrer la vidéo
-        
-    Returns:
-        True si le téléchargement a réussi, False sinon
-    """
-    try:
-        # Créer un fichier de cookies temporaire
-        cookies_file = os.path.join(tempfile.gettempdir(), 'youtube_cookies.txt')
-        
-        # Récupérer les cookies depuis les variables d'environnement
-        youtube_cookies = os.environ.get('YOUTUBE_COOKIES')
-        if youtube_cookies:
-            logger.info("Utilisation des cookies YouTube depuis les variables d'environnement")
-            with open(cookies_file, 'w') as f:
-                f.write(youtube_cookies)
-        else:
-            # Si pas de cookies, créer un fichier de cookies minimal
-            logger.warning("Aucun cookie YouTube trouvé, création d'un fichier minimal")
-            with open(cookies_file, 'w') as f:
-                f.write("# Netscape HTTP Cookie File\n")
-                f.write(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tCONSENT\tYES+cb\n")
-        
-        import yt_dlp
-        
-        # Options pour yt-dlp
-        ydl_opts = {
-            'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
-            'outtmpl': output_path,
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'noplaylist': True,
-            'retries': 3,
-            'fragment_retries': 3,
-            'skip_download': False,
-            'cookies': cookies_file,  # Utiliser le fichier de cookies créé
-            'geo_bypass': True,
-            'geo_bypass_country': 'US',
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web'],
-                    'player_skip': ['webpage', 'js'],
-                }
-            }
-        }
-        
-        # URL de la vidéo
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Télécharger la vidéo
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            logger.info(f"Téléchargement de la vidéo {video_id} avec yt-dlp")
-            ydl.download([video_url])
-        
-        # Vérifier que le fichier a été téléchargé
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            logger.info(f"Vidéo téléchargée avec succès: {output_path}")
-            return True
-        else:
-            logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
-        logger.error 
-        logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def _download_with_alternative_method(video_id, output_path):
-    """
-    Méthode alternative pour télécharger une vidéo YouTube
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin où enregistrer la vidéo
-        
-    Returns:
-        True si le téléchargement a réussi, False sinon
-    """
-    try:
-        logger.info(f"Tentative de téléchargement alternatif pour la vidéo {video_id}")
-        
-        # Essayer d'utiliser pytube comme alternative
-        try:
-            from pytube import YouTube
-            
-            # URL de la vidéo
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            
-            # Télécharger la vidéo
-            logger.info(f"Téléchargement de la vidéo {video_id} avec pytube")
-            yt = YouTube(video_url)
-            
-            # Obtenir le flux vidéo de meilleure qualité en MP4
-            video_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-            
-            if not video_stream:
-                logger.warning(f"Aucun flux vidéo MP4 trouvé pour {video_id}, essai avec n'importe quel format")
-                video_stream = yt.streams.filter(progressive=True).order_by('resolution').desc().first()
-            
-            if not video_stream:
-                logger.error(f"Aucun flux vidéo trouvé pour {video_id}")
-                return False
-            
-            # Télécharger la vidéo
-            video_stream.download(output_path=os.path.dirname(output_path), filename=os.path.basename(output_path))
-            
-            # Vérifier que le fichier a été téléchargé
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info(f"Vidéo téléchargée avec succès via pytube: {output_path} ({os.path.getsize(output_path)} octets)")
-                return True
-            else:
-                logger.error(f"Le fichier téléchargé est vide ou n'existe pas: {output_path}")
-                return False
-                
-        except ImportError:
-            logger.warning("pytube n'est pas installé, impossible d'utiliser cette méthode alternative")
-            return False
-        except Exception as e:
-            logger.error(f"Erreur lors du téléchargement avec pytube: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement alternatif: {str(e)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-def _save_queue_backup():
-    """
-    Sauvegarde la file d'attente dans un fichier
-    """
-    try:
-        # Créer une liste des éléments dans la file d'attente
-        queue_items = []
-        with download_lock:
-            # Copier les éléments de la file d'attente
-            temp_queue = list(download_queue.queue)
-            for item in temp_queue:
-                video_id, output_path, _ = item
-                queue_items.append({
-                    'video_id': video_id,
-                    'output_path': output_path
-                })
-        
-        # Sauvegarder dans un fichier
-        with open(QUEUE_BACKUP_FILE, 'w') as f:
-            json.dump(queue_items, f)
-            
-        logger.info(f"File d'attente sauvegardée: {len(queue_items)} éléments")
-    except Exception as e:
-        logger.error(f"Erreur lors de la sauvegarde de la file d'attente: {str(e)}")
-
-def _load_queue_backup():
-    """
-    Charge la file d'attente depuis un fichier
-    """
-    try:
-        if not os.path.exists(QUEUE_BACKUP_FILE):
-            logger.info("Aucune sauvegarde de file d'attente trouvée")
-            return
-            
-        # Charger depuis le fichier
-        with open(QUEUE_BACKUP_FILE, 'r') as f:
-            queue_items = json.load(f)
-            
-        # Ajouter les éléments à la file d'attente
-        for item in queue_items:
-            video_id = item.get('video_id')
-            output_path = item.get('output_path')
-            
-            if video_id and _is_valid_youtube_id(video_id):
-                # Ajouter à la file d'attente sans callback (sera géré par le système de notification)
-                download_queue.put((video_id, output_path, None))
-                
-        logger.info(f"File d'attente chargée: {len(queue_items)} éléments")
-        
-        # Supprimer le fichier de sauvegarde
-        os.remove(QUEUE_BACKUP_FILE)
-    except Exception as e:
-        logger.error(f"Erreur lors du chargement de la file d'attente: {str(e)}")
-
-def _process_download_queue():
-    """
-    Traite la file d'attente des téléchargements
-    """
-    global current_downloads, should_stop, download_thread_running
-    
-    logger.info("Démarrage du thread de traitement de la file d'attente")
-    download_thread_running = True
-    
-    # Charger la sauvegarde de la file d'attente
-    _load_queue_backup()
-    
-    while not should_stop:
-        try:
-            # Récupérer un élément de la file d'attente avec un timeout
+        if api_key:
             try:
-                video_id, output_path, callback = download_queue.get(block=True, timeout=1)
-                logger.info(f"Élément récupéré de la file d'attente: {video_id}")
-            except queue.Empty:
-                # La file d'attente est vide, attendre un peu
-                continue
-            
-            with download_lock:
-                current_downloads += 1
-            
-            try:
-                logger.info(f"Traitement du téléchargement pour la vidéo: {video_id}")
+                url = f"https://www.googleapis.com/youtube/v3/videos?id={video_id}&key={api_key}&part=snippet,contentDetails,statistics"
+                response = requests.get(url)
                 
-                # Télécharger la vidéo
-                result = _download_video(video_id, output_path)
-                logger.info(f"Téléchargement terminé pour la vidéo {video_id}: {result}")
-                
-                # Appeler le callback avec le résultat
-                if callback:
-                    try:
-                        logger.info(f"Appel du callback pour la vidéo {video_id}")
-                        callback(result)
-                        logger.info(f"Callback terminé pour la vidéo {video_id}")
-                    except Exception as e:
-                        logger.error(f"Erreur lors de l'appel du callback: {str(e)}")
-                        logger.error(traceback.format_exc())
-                else:
-                    # Si pas de callback, notifier via le système de notification
-                    logger.info(f"Pas de callback pour la vidéo {video_id}")
+                if response.status_code == 200:
+                    data = response.json()
                     
-                    # Essayer de notifier via messenger_api si c'est disponible
-                    try:
-                        from src.messenger_api import handle_download_callback
-                        from src.database import get_database
+                    if data.get('items'):
+                        item = data['items'][0]
+                        snippet = item.get('snippet', {})
                         
-                        # Récupérer les informations de la vidéo depuis la base de données
-                        db = get_database()
-                        if db is not None:
-                            pending_downloads = db.pending_downloads
-                            pending = pending_downloads.find_one({"video_id": video_id})
-                            
-                            if pending:
-                                recipient_id = pending.get("recipient_id")
-                                title = pending.get("title", "Vidéo YouTube")
-                                
-                                if recipient_id:
-                                    logger.info(f"Notification de téléchargement pour {recipient_id}, vidéo {video_id}")
-                                    handle_download_callback(recipient_id, video_id, title, result)
-                    except Exception as e:
-                        logger.error(f"Erreur lors de la notification: {str(e)}")
-                        logger.error(traceback.format_exc())
-                    
+                        return {
+                            'videoId': video_id,
+                            'title': snippet.get('title', ''),
+                            'description': snippet.get('description', ''),
+                            'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"),
+                            'channelTitle': snippet.get('channelTitle', ''),
+                            'publishedAt': snippet.get('publishedAt', '')
+                        }
+                    else:
+                        logger.warning(f"Aucun élément trouvé pour la vidéo: {video_id}")
+                else:
+                    logger.warning(f"Erreur lors de la récupération des détails de la vidéo: {response.status_code} - {response.text}")
             except Exception as e:
-                logger.error(f"Erreur lors du traitement du téléchargement: {str(e)}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                
-                # Appeler le callback avec None en cas d'erreur
-                if callback:
-                    try:
-                        callback(None)
-                    except Exception as e:
-                        logger.error(f"Erreur lors de l'appel du callback d'erreur: {str(e)}")
+                logger.error(f"Erreur lors de l'appel à l'API YouTube: {str(e)}")
+        
+        # Méthode alternative: scraper la page YouTube
+        try:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            response = requests.get(url)
             
-            finally:
-                # Marquer la tâche comme terminée
-                download_queue.task_done()
+            if response.status_code == 200:
+                # Extraire le titre
+                title_match = re.search(r'<title>(.*?)</title>', response.text)
+                title = title_match.group(1).replace(' - YouTube', '') if title_match else 'Vidéo YouTube'
                 
-                with download_lock:
-                    current_downloads -= 1
+                # Extraire la description (simplifiée)
+                description_match = re.search(r'<meta name="description" content="(.*?)"', response.text)
+                description = description_match.group(1) if description_match else ''
                 
-        except Exception as e:
-            logger.error(f"Erreur dans le thread de traitement de la file d'attente: {str(e)}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            time.sleep(5)  # Attendre un peu avant de réessayer
-    
-    logger.info("Arrêt du thread de traitement de la file d'attente")
-    
-    # Sauvegarder la file d'attente avant de terminer
-    _save_queue_backup()
-    download_thread_running = False
-
-def _download_video(video_id, output_path=None):
-    """
-    Télécharge une vidéo YouTube (implémentation interne)
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
-        
-    Returns:
-        Chemin du fichier téléchargé, URL YouTube en cas d'erreur, ou None en cas d'erreur
-    """
-    logger.info(f"Début du téléchargement de la vidéo YouTube: {video_id}")
-    logger.info(f"Chemin de sortie spécifié: {output_path}")
-    
-    # Valider l'ID de la vidéo
-    if not _is_valid_youtube_id(video_id):
-        logger.error(f"ID de vidéo invalide: {video_id}")
-        return None
-    
-    # Vérifier si la vidéo est dans le cache
-    if _is_in_cache(video_id):
-        cache_path = _get_cache_path(video_id)
-        logger.info(f"Vidéo trouvée dans le cache: {cache_path}")
-        
-        # Si un chemin de sortie est spécifié, copier le fichier
-        if output_path:
-            try:
-                shutil.copy2(cache_path, output_path)
-                logger.info(f"Vidéo copiée du cache vers: {output_path}")
-                return output_path
-            except Exception as e:
-                logger.error(f"Erreur lors de la copie du cache: {str(e)}")
-                return cache_path
-        else:
-            return cache_path
-    
-    # Déterminer le chemin de sortie
-    if not output_path:
-        try:
-            # Essayer d'utiliser /tmp qui est généralement accessible en écriture
-            temp_dir = '/tmp'
-            if not os.path.exists(temp_dir):
-                temp_dir = tempfile.gettempdir()
-                
-            # Générer un nom de fichier unique
-            filename = f"youtube_{video_id}_{uuid.uuid4().hex[:8]}.mp4"
-            output_path = os.path.join(temp_dir, filename)
-            logger.info(f"Chemin de sortie généré: {output_path}")
-        except Exception as e:
-            logger.error(f"Erreur lors de la génération du chemin de sortie: {str(e)}")
-            return None
-    
-    # Vérifier si nous avons atteint la limite de requêtes
-    if not _check_rate_limit():
-        logger.warning("Limite de requêtes atteinte, retour de l'URL YouTube")
-        return f"https://www.youtube.com/watch?v={video_id}"
-    
-    # Ajouter un délai aléatoire pour éviter les erreurs 429
-    random_delay = random.uniform(1, 3)
-    logger.info(f"Ajout d'un délai aléatoire de {random_delay:.2f} secondes avant le téléchargement")
-    time.sleep(random_delay)
-    
-    # Essayer d'abord avec RapidAPI
-    logger.info("Tentative de téléchargement avec RapidAPI")
-    if _download_with_rapidapi(video_id, output_path):
-        # Ajouter au cache
-        try:
-            cache_path = _get_cache_path(video_id)
-            shutil.copy2(output_path, cache_path)
-            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-        except Exception as e:
-            logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
-        
-        return output_path
-    
-    # Si RapidAPI échoue, essayer avec yt-dlp
-    logger.info("RapidAPI a échoué, tentative avec yt-dlp")
-    if _download_with_yt_dlp(video_id, output_path):
-        # Ajouter au cache
-        try:
-            cache_path = _get_cache_path(video_id)
-            shutil.copy2(output_path, cache_path)
-            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-        except Exception as e:
-            logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
-        
-        return output_path
-    
-    # Si yt-dlp échoue, essayer avec pytube
-    logger.info("yt-dlp a échoué, tentative avec pytube")
-    if _download_with_alternative_method(video_id, output_path):
-        # Ajouter au cache
-        try:
-            cache_path = _get_cache_path(video_id)
-            shutil.copy2(output_path, cache_path)
-            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-        except Exception as e:
-            logger.error(f"Erreur lors de l'ajout au cache: {str(e)}")
-        
-        return output_path
-    
-    # Si tout échoue, retourner l'URL YouTube
-    logger.error(f"Toutes les méthodes de téléchargement ont échoué")
-    return f"https://www.youtube.com/watch?v={video_id}"
-
-def download_youtube_video(video_id, output_path=None, callback=None):
-    """
-    Télécharge une vidéo YouTube en utilisant un système de file d'attente
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
-        callback: Fonction à appeler avec le résultat du téléchargement
-        
-    Returns:
-        True si le téléchargement a été ajouté à la file d'attente, False sinon
-    """
-    global current_downloads, download_thread_running
-    
-    logger.info(f"État du thread de téléchargement: en cours d'exécution = {download_thread_running}, thread vivant = {download_thread and download_thread.is_alive()}")
-    
-    try:
-        # S'assurer que le thread de téléchargement est en cours d'exécution
-        if not download_thread_running or not download_thread or not download_thread.is_alive():
-            logger.warning("Le thread de téléchargement n'est pas en cours d'exécution, redémarrage...")
-            start_download_thread()
-        
-        # Vérifier si la vidéo est dans le cache
-        if _is_in_cache(video_id):
-            cache_path = _get_cache_path(video_id)
-            logger.info(f"Vidéo trouvée dans le cache: {cache_path}")
-            
-            # Si un chemin de sortie est spécifié, copier le fichier
-            if output_path:
-                try:
-                    shutil.copy2(cache_path, output_path)
-                    logger.info(f"Vidéo copiée du cache vers: {output_path}")
-                    
-                    # Appeler le callback avec le résultat
-                    if callback:
-                        callback(output_path)
-                    
-                    return True
-                except Exception as e:
-                    logger.error(f"Erreur lors de la copie du cache: {str(e)}")
-                    
-                    # Appeler le callback avec le chemin du cache
-                    if callback:
-                        callback(cache_path)
-                    
-                    return True
+                return {
+                    'videoId': video_id,
+                    'title': title,
+                    'description': description,
+                    'thumbnail': f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+                }
             else:
-                # Appeler le callback avec le chemin du cache
-                if callback:
-                    callback(cache_path)
-                
-                return True
+                logger.warning(f"Erreur lors de la récupération de la page YouTube: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Erreur lors du scraping de la page YouTube: {str(e)}")
         
-        # Vérifier si nous avons atteint le nombre maximum de téléchargements simultanés
-        with download_lock:
-            if current_downloads >= MAX_CONCURRENT_DOWNLOADS:
-                logger.warning(f"Nombre maximum de téléchargements simultanés atteint ({MAX_CONCURRENT_DOWNLOADS})")
-            
-            # Ajouter à la file d'attente
-            download_queue.put((video_id, output_path, callback))
-            logger.info(f"Téléchargement ajouté à la file d'attente: {video_id}")
-            
-            # Sauvegarder les informations du téléchargement dans la base de données si possible
+        # Si tout échoue, retourner des informations minimales
+        return {
+            'videoId': video_id,
+            'title': 'Vidéo YouTube',
+            'description': '',
+            'thumbnail': f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+        }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des détails de la vidéo: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def search_youtube(query, max_results=10):
+    """
+    Recherche des vidéos sur YouTube
+    
+    Args:
+        query: Requête de recherche
+        max_results: Nombre maximum de résultats
+        
+    Returns:
+        Liste de vidéos
+    """
+    try:
+        logger.info(f"Recherche YouTube pour: {query}")
+        
+        # Utiliser l'API YouTube Data pour la recherche
+        api_key = os.environ.get('YOUTUBE_API_KEY')
+        
+        if api_key:
             try:
-                from src.database import get_database
-                db = get_database()
-                if db is not None and callback:
-                    # Essayer de trouver l'ID du destinataire à partir du callback
-                    import inspect
-                    callback_source = inspect.getsource(callback)
-                    if "recipient_id" in callback_source:
-                        # Extraire l'ID du destinataire du code source du callback
-                        import re
-                        match = re.search(r"recipient_id\s*=\s*['\"]([^'\"]+)['\"]", callback_source)
-                        if match:
-                            recipient_id = match.group(1)
-                            
-                            # Sauvegarder dans la base de données
-                            pending_downloads = db.pending_downloads
-                            pending_downloads.update_one(
-                                {"video_id": video_id},
-                                {"$set": {
-                                    "video_id": video_id,
-                                    "recipient_id": recipient_id,
-                                    "output_path": output_path,
-                                    "created_at": time.time()
-                                }},
-                                upsert=True
-                            )
-                            logger.info(f"Téléchargement sauvegardé dans la base de données: {video_id} pour {recipient_id}")
+                url = f"https://www.googleapis.com/youtube/v3/search?part=snippet&q={query}&key={api_key}&type=video&maxResults={max_results}"
+                response = requests.get(url)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    videos = []
+                    for item in data.get('items', []):
+                        video_id = item.get('id', {}).get('videoId')
+                        snippet = item.get('snippet', {})
+                        
+                        if video_id:
+                            videos.append({
+                                'videoId': video_id,
+                                'title': snippet.get('title', ''),
+                                'description': snippet.get('description', ''),
+                                'thumbnail': snippet.get('thumbnails', {}).get('high', {}).get('url', f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"),
+                                'channelTitle': snippet.get('channelTitle', ''),
+                                'publishedAt': snippet.get('publishedAt', '')
+                            })
+                    
+                    logger.info(f"Résultats de la recherche YouTube: {len(videos)} vidéos trouvées")
+                    return videos
+                else:
+                    logger.warning(f"Erreur lors de la recherche YouTube: {response.status_code} - {response.text}")
             except Exception as e:
-                logger.error(f"Erreur lors de la sauvegarde du téléchargement dans la base de données: {str(e)}")
-                logger.error(traceback.format_exc())
+                logger.error(f"Erreur lors de l'appel à l'API YouTube: {str(e)}")
+        
+        # Méthode alternative: utiliser youtube-dl pour la recherche
+        try:
+            # Créer un répertoire temporaire pour les résultats
+            with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as temp_file:
+                temp_path = temp_file.name
             
-            return True
+            # Exécuter youtube-dl pour la recherche
+            command = [
+                'yt-dlp',
+                '--dump-json',
+                '--default-search', 'ytsearch',
+                '--no-playlist',
+                '--flat-playlist',
+                f'ytsearch{max_results}:{query}'
+            ]
             
+            logger.info(f"Exécution de la commande: {' '.join(command)}")
+            
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                logger.warning(f"Erreur lors de l'exécution de yt-dlp: {stderr}")
+                raise Exception(f"Erreur yt-dlp: {stderr}")
+            
+            # Traiter les résultats
+            videos = []
+            for line in stdout.splitlines():
+                if line.strip():
+                    try:
+                        data = json.loads(line)
+                        video_id = data.get('id')
+                        
+                        if video_id:
+                            videos.append({
+                                'videoId': video_id,
+                                'title': data.get('title', ''),
+                                'description': data.get('description', ''),
+                                'thumbnail': data.get('thumbnail', f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"),
+                                'channelTitle': data.get('channel', ''),
+                                'publishedAt': data.get('upload_date', '')
+                            })
+                    except json.JSONDecodeError:
+                        logger.warning(f"Impossible de décoder la ligne JSON: {line}")
+            
+            logger.info(f"Résultats de la recherche yt-dlp: {len(videos)} vidéos trouvées")
+            return videos
+        except Exception as e:
+            logger.error(f"Erreur lors de la recherche avec yt-dlp: {str(e)}")
+            logger.error(traceback.format_exc())
+        
+        # Si tout échoue, retourner une liste vide
+        logger.warning("Toutes les méthodes de recherche ont échoué")
+        return []
+    except Exception as e:
+        logger.error(f"Erreur lors de la recherche YouTube: {str(e)}")
+        logger.error(traceback.format_exc())
+        return []
+
+def download_youtube_video(video_id, output_path, callback=None):
+    """
+    Télécharge une vidéo YouTube
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        callback: Fonction de rappel à appeler une fois le téléchargement terminé
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Ajout du téléchargement à la file d'attente: {video_id}")
+        
+        # Ajouter le téléchargement à la file d'attente
+        with download_queue_lock:
+            download_queue.append({
+                'video_id': video_id,
+                'output_path': output_path,
+                'callback': callback,
+                'added_time': time.time()
+            })
+        
+        # Démarrer le thread de traitement s'il n'est pas déjà en cours d'exécution
+        start_download_thread()
+        
+        return True
     except Exception as e:
         logger.error(f"Erreur lors de l'ajout du téléchargement à la file d'attente: {str(e)}")
         logger.error(traceback.format_exc())
         
-        # Appeler le callback avec None en cas d'erreur
         if callback:
             callback(None)
         
@@ -1147,56 +321,241 @@ def download_youtube_video(video_id, output_path=None, callback=None):
 
 def start_download_thread():
     """
-    Démarre le thread de téléchargement s'il n'est pas déjà en cours d'exécution
+    Démarre le thread de traitement des téléchargements
     """
-    global download_thread, download_thread_running, should_stop
+    global download_thread, download_thread_running
     
-    if download_thread_running and download_thread and download_thread.is_alive():
-        logger.info("Le thread de téléchargement est déjà en cours d'exécution")
+    if download_thread_running:
         return
     
-    logger.info("Démarrage du thread de téléchargement")
-    should_stop = False
-    download_thread = threading.Thread(target=_process_download_queue)
-    download_thread.daemon = True  # Thread daemon pour qu'il s'arrête automatiquement à la fin du programme
+    download_thread_running = True
+    download_thread = threading.Thread(target=process_download_queue)
+    download_thread.daemon = True
     download_thread.start()
     
-    # Vérifier que le thread a bien démarré
-    time.sleep(0.5)
-    if download_thread.is_alive():
-        logger.info("Thread de téléchargement démarré avec succès")
-    else:
-        logger.error("Échec du démarrage du thread de téléchargement")
+    logger.info("Thread de téléchargement démarré")
 
-def stop_download_thread():
+def process_download_queue():
     """
-    Arrête le thread de téléchargement proprement
+    Traite la file d'attente des téléchargements
     """
-    global should_stop, download_thread
+    global download_thread_running
     
-    logger.info("Arrêt du thread de téléchargement demandé")
-    should_stop = True
-    
-    # Attendre que le thread se termine
-    if download_thread and download_thread.is_alive():
-        download_thread.join(timeout=10)
+    try:
+        logger.info("Démarrage du traitement de la file d'attente des téléchargements")
         
-    logger.info("Thread de téléchargement arrêté")
+        while True:
+            # Vérifier s'il y a des téléchargements dans la file d'attente
+            with download_queue_lock:
+                if not download_queue:
+                    logger.info("File d'attente vide, arrêt du thread")
+                    download_thread_running = False
+                    break
+                
+                # Récupérer le prochain téléchargement
+                download = download_queue.pop(0)
+            
+            # Traiter le téléchargement
+            video_id = download['video_id']
+            output_path = download['output_path']
+            callback = download['callback']
+            
+            logger.info(f"Traitement du téléchargement: {video_id}")
+            
+            # Acquérir le sémaphore pour limiter les téléchargements simultanés
+            download_semaphore.acquire()
+            
+            try:
+                # Télécharger la vidéo
+                result = download_video(video_id, output_path)
+                
+                # Appeler le callback
+                if callback:
+                    callback(result)
+                    logger.info(f"Callback terminé pour la vidéo {video_id}")
+            except Exception as e:
+                logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                if callback:
+                    callback(None)
+                    logger.info(f"Callback terminé pour la vidéo {video_id} (avec erreur)")
+            finally:
+                # Libérer le sémaphore
+                download_semaphore.release()
+            
+            # Attendre un peu pour éviter de surcharger le système
+            time.sleep(0.5)
+    except Exception as e:
+        logger.error(f"Erreur dans le thread de téléchargement: {str(e)}")
+        logger.error(traceback.format_exc())
+    finally:
+        download_thread_running = False
+        logger.info("Thread de téléchargement arrêté")
 
-# Gestionnaire de signal pour arrêter proprement le thread
-def signal_handler(signum, frame):
-    logger.info(f"Signal reçu: {signum}")
-    stop_download_thread()
+def download_video(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Téléchargement de la vidéo: {video_id}")
+        
+        # Vérifier si l'ID est valide
+        if not video_id or not re.match(r'^[a-zA-Z0-9_-]{11}$', video_id):
+            logger.warning(f"ID vidéo invalide: {video_id}")
+            return None
+        
+        # Vérifier si la vidéo est déjà dans le cache
+        cache_path = os.path.join(CACHE_DIR, f"{video_id}.mp4")
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 10000:
+            logger.info(f"Vidéo trouvée dans le cache: {cache_path}")
+            
+            # Copier le fichier du cache vers le chemin de sortie
+            import shutil
+            shutil.copy2(cache_path, output_path)
+            
+            # Vérifier si le fichier a été copié correctement
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                logger.info(f"Vidéo copiée du cache: {output_path} ({os.path.getsize(output_path)} octets)")
+                return output_path
+        
+        # Créer le répertoire de sortie s'il n'existe pas
+        output_dir = os.path.dirname(output_path)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Télécharger la vidéo avec yt-dlp
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Utiliser yt-dlp pour télécharger la vidéo
+        command = [
+            'yt-dlp',
+            '--format', 'mp4[height<=720]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best',
+            '--merge-output-format', 'mp4',
+            '--output', output_path,
+            '--no-playlist',
+            '--no-warnings',
+            '--quiet',
+            '--no-check-certificate',
+            '--no-cache-dir',
+            '--progress',
+            '--max-filesize', '50M',  # Taille maximale de 50 Mo
+            '--no-part',  # Ne pas utiliser de fichiers temporaires .part
+            '--no-mtime',  # Ne pas utiliser la date de modification du fichier
+            '--prefer-ffmpeg',  # Préférer ffmpeg pour le post-traitement
+            '--no-hls-use-mpegts',  # Ne pas utiliser MPEG-TS pour les flux HLS
+            url
+        ]
+        
+        logger.info(f"Exécution de la commande: {' '.join(command)}")
+        
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            logger.warning(f"Erreur lors de l'exécution de yt-dlp: {stderr}")
+            
+            # Vérifier si c'est une erreur de restriction d'âge
+            if "age-restricted" in stderr:
+                logger.warning("Vidéo avec restriction d'âge, tentative avec --age-limit=21")
+                
+                # Réessayer avec --age-limit=21
+                command.append('--age-limit=21')
+                
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                
+                stdout, stderr = process.communicate()
+                
+                if process.returncode != 0:
+                    logger.warning(f"Erreur lors de la seconde tentative: {stderr}")
+                    return url
+            else:
+                return url
+        
+        # Vérifier si le fichier existe et a une taille non nulle
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.warning(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+            return url
+        
+        # Vérifier la taille du fichier
+        file_size = os.path.getsize(output_path)
+        logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
+        
+        if file_size < 10000:  # Moins de 10 Ko
+            logger.warning(f"Le fichier téléchargé est trop petit: {file_size} octets")
+            return url
+        
+        # Vérifier si le fichier est une vidéo valide
+        try:
+            # Utiliser ffprobe pour vérifier si le fichier est une vidéo valide
+            command = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'stream=codec_type',
+                '-of', 'json',
+                output_path
+            ]
+            
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                logger.warning(f"Erreur lors de la vérification du fichier vidéo: {stderr}")
+                return url
+            
+            # Vérifier si le fichier contient un flux vidéo
+            data = json.loads(stdout)
+            has_video_stream = False
+            
+            for stream in data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    has_video_stream = True
+                    break
+            
+            if not has_video_stream:
+                logger.warning("Le fichier ne contient pas de flux vidéo")
+                return url
+            
+            # Ajouter la vidéo au cache
+            try:
+                import shutil
+                shutil.copy2(output_path, cache_path)
+                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+            
+            logger.info(f"Téléchargement terminé pour la vidéo {video_id}: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Erreur lors de la vérification du fichier vidéo: {str(e)}")
+            logger.error(traceback.format_exc())
+            return url
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
 
-# Enregistrer les gestionnaires de signal
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-# Enregistrer la fonction d'arrêt pour qu'elle soit appelée à la fin du programme
-atexit.register(stop_download_thread)
-
-# Démarrer le thread de téléchargement
-download_thread = None
-start_download_thread()
-
-logger.info("Module YouTube API initialisé avec système de file d'attente")
