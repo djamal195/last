@@ -186,7 +186,51 @@ def handle_download_callback(recipient_id, video_id, title, result):
         
         logger.info(f"Vidéo téléchargée avec succès: {result}")
         
-        # Télécharger la vidéo sur Cloudinary pour obtenir une URL publique
+        # Essayer d'envoyer directement le fichier
+        try:
+            logger.info(f"Tentative d'envoi direct du fichier: {result}")
+            send_text_message(recipient_id, f"Voici votre vidéo : {title}")
+            send_file_response = send_file_attachment(recipient_id, result, "video")
+            
+            if send_file_response:
+                logger.info(f"Fichier envoyé avec succès directement: {send_file_response}")
+                
+                # Sauvegarder dans la base de données pour une utilisation future
+                try:
+                    from src.database import get_database
+                    db = get_database()
+                    if db is not None:
+                        video_collection = db.videos
+                        video_collection.update_one(
+                            {"video_id": video_id},
+                            {"$set": {
+                                "video_id": video_id,
+                                "title": title,
+                                "direct_sent": True,
+                                "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+                                "created_at": time.time()
+                            }},
+                            upsert=True
+                        )
+                        logger.info(f"Vidéo sauvegardée dans la base de données: {video_id}")
+                except Exception as e:
+                    logger.error(f"Erreur lors de la sauvegarde dans la base de données: {str(e)}")
+                
+                # Nettoyer le répertoire temporaire
+                try:
+                    temp_dir = os.path.dirname(result)
+                    if temp_dir.startswith('/tmp/tmp'):
+                        shutil.rmtree(temp_dir)
+                        logger.info(f"Répertoire temporaire nettoyé : {temp_dir}")
+                except Exception as e:
+                    logger.error(f"Erreur lors du nettoyage du répertoire temporaire: {str(e)}")
+                
+                return
+        except Exception as e:
+            logger.error(f"Erreur lors de l'envoi direct du fichier: {str(e)}")
+            logger.error(traceback.format_exc())
+        
+        # Si l'envoi direct échoue, essayer Cloudinary
         try:
             logger.info(f"Tentative de téléchargement sur Cloudinary: {result}")
             
@@ -215,6 +259,17 @@ def handle_download_callback(recipient_id, video_id, title, result):
             video_url = cloudinary_result.get('secure_url')
             logger.info(f"Vidéo téléchargée sur Cloudinary: {video_url}")
             
+            # Vérifier si l'URL est une URL vidéo ou raw
+            is_video_url = "video/upload" in video_url
+            is_raw_url = "raw/upload" in video_url
+            
+            # Si c'est une URL raw, essayer de la transformer en URL vidéo
+            if is_raw_url:
+                logger.warning("URL Cloudinary de type 'raw', cela peut ne pas fonctionner avec Messenger")
+                # Essayer d'envoyer le lien YouTube comme solution de secours
+                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                return
+            
             # Sauvegarder l'URL dans la base de données pour une utilisation future
             from src.database import get_database
             db = get_database()
@@ -236,22 +291,16 @@ def handle_download_callback(recipient_id, video_id, title, result):
             
             # Envoyer la vidéo à l'utilisateur
             send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-            send_video_message(recipient_id, video_url)
+            send_video_response = send_video_message(recipient_id, video_url)
+            
+            if not send_video_response:
+                logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary")
+                # Envoyer le lien YouTube comme solution de secours
+                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
             
         except Exception as e:
             logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
             logger.error(traceback.format_exc())
-            
-            # Vérifier si le fichier existe et a une taille raisonnable
-            if os.path.exists(result) and os.path.getsize(result) > 1024 * 1024:  # Plus de 1 MB
-                # Essayer d'envoyer directement le fichier
-                logger.info(f"Tentative d'envoi direct du fichier: {result}")
-                try:
-                    send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-                    send_file_attachment(recipient_id, result, "video")
-                    return
-                except Exception as e2:
-                    logger.error(f"Erreur lors de l'envoi direct du fichier: {str(e2)}")
             
             # Envoyer le lien YouTube comme solution de secours
             send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter la vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
@@ -329,6 +378,13 @@ def handle_watch_video(recipient_id, video_id, title):
 def send_video_message(recipient_id, video_url):
     """
     Envoie un message vidéo à l'utilisateur
+    
+    Args:
+        recipient_id: ID du destinataire
+        video_url: URL de la vidéo à envoyer
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
     """
     logger.info(f"Envoi de la vidéo à {recipient_id}: {video_url}")
     
@@ -349,6 +405,7 @@ def send_video_message(recipient_id, video_url):
     
     response = call_send_api(message_data)
     logger.info(f"Réponse de l'API pour l'envoi de vidéo: {json.dumps(response) if response else 'None'}")
+    return response
 
 def send_file_attachment(recipient_id, file_path, attachment_type):
     """
@@ -358,6 +415,9 @@ def send_file_attachment(recipient_id, file_path, attachment_type):
         recipient_id: ID du destinataire
         file_path: Chemin du fichier à envoyer
         attachment_type: Type de pièce jointe (image, video, audio, file)
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
     """
     logger.info(f"Envoi du fichier {file_path} à {recipient_id}")
     
