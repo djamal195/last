@@ -346,7 +346,7 @@ def handle_download_callback(recipient_id, video_id, title, result):
                 logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary")
                 # Envoyer le lien YouTube comme solution de secours
                 send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
-                send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
+                send_text_message(recipient_id, "Pour r��essayer avec une autre méthode, envoyez: /retry " + video_id)
             
         except Exception as e:
             logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
