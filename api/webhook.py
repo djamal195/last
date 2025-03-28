@@ -42,9 +42,8 @@ def cleanup():
 def health_check():
     return jsonify({"status": "ok"})
 
-# Route pour le webhook Messenger
-@app.route('/webhook', methods=['GET', 'POST'])
-def webhook():
+# Fonction commune pour traiter les requêtes webhook
+def process_webhook():
     if request.method == 'GET':
         # Vérification du webhook par Facebook
         verify_token = request.args.get('hub.verify_token')
@@ -79,6 +78,17 @@ def webhook():
             logger.error(f"Erreur lors du traitement du webhook: {str(e)}")
             logger.error(f"Données reçues: {request.data}")
             return 'Erreur lors du traitement du webhook', 500
+
+# Route pour le webhook Messenger (chemin original)
+@app.route('/webhook', methods=['GET', 'POST'])
+def webhook():
+    return process_webhook()
+
+# Route pour le webhook Messenger (chemin avec préfixe /api)
+@app.route('/api/webhook', methods=['GET', 'POST'])
+def api_webhook():
+    logger.info(f"Requête reçue sur /api/webhook: {request.method}")
+    return process_webhook()
 
 # Route pour le test de l'API
 @app.route('/', methods=['GET'])
