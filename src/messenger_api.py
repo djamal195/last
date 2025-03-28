@@ -263,13 +263,6 @@ def handle_download_callback(recipient_id, video_id, title, result):
             is_video_url = "video/upload" in video_url
             is_raw_url = "raw/upload" in video_url
             
-            # Si c'est une URL raw, essayer de la transformer en URL vidéo
-            if is_raw_url:
-                logger.warning("URL Cloudinary de type 'raw', cela peut ne pas fonctionner avec Messenger")
-                # Essayer d'envoyer le lien YouTube comme solution de secours
-                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
-                return
-            
             # Sauvegarder l'URL dans la base de données pour une utilisation future
             from src.database import get_database
             db = get_database()
@@ -282,12 +275,19 @@ def handle_download_callback(recipient_id, video_id, title, result):
                         "video_id": video_id,
                         "title": title,
                         "cloudinary_url": video_url,
+                        "is_raw_url": is_raw_url,
                         "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
                         "created_at": time.time()
                     }},
                     upsert=True
                 )
                 logger.info(f"Vidéo sauvegardée dans la base de données: {video_id}")
+            
+            # Si c'est une URL raw, envoyer directement le lien YouTube
+            if is_raw_url:
+                logger.warning("URL Cloudinary de type 'raw', envoi du lien YouTube à la place")
+                send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                return
             
             # Envoyer la vidéo à l'utilisateur
             send_text_message(recipient_id, f"Voici votre vidéo : {title}")
@@ -341,11 +341,26 @@ def handle_watch_video(recipient_id, video_id, title):
             video_collection = db.videos
             existing_video = video_collection.find_one({"video_id": video_id})
             
-            if existing_video and existing_video.get('cloudinary_url'):
+            if existing_video:
                 logger.info(f"Vidéo trouvée dans la base de données: {video_id}")
-                send_text_message(recipient_id, f"Voici votre vidéo : {title}")
-                send_video_message(recipient_id, existing_video.get('cloudinary_url'))
-                return
+                
+                # Vérifier si l'URL est de type raw
+                is_raw_url = existing_video.get('is_raw_url', False)
+                cloudinary_url = existing_video.get('cloudinary_url')
+                
+                if is_raw_url or (cloudinary_url and "raw/upload" in cloudinary_url):
+                    logger.warning("URL Cloudinary de type 'raw' trouvée dans la base de données, envoi du lien YouTube à la place")
+                    send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                    return
+                
+                if cloudinary_url:
+                    send_text_message(recipient_id, f"Voici votre vidéo : {title}")
+                    send_video_response = send_video_message(recipient_id, cloudinary_url)
+                    
+                    if not send_video_response:
+                        logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary stockée")
+                        send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
+                    return
         
         # Initialiser le dictionnaire des téléchargements en cours pour cet utilisateur
         if recipient_id not in pending_downloads:
@@ -387,6 +402,11 @@ def send_video_message(recipient_id, video_url):
         Réponse de l'API ou None en cas d'erreur
     """
     logger.info(f"Envoi de la vidéo à {recipient_id}: {video_url}")
+    
+    # Vérifier si l'URL est une URL raw de Cloudinary
+    if "raw/upload" in video_url:
+        logger.warning("URL Cloudinary de type 'raw' détectée, impossible d'envoyer via Messenger")
+        return None
     
     message_data = {
         "recipient": {
@@ -510,3 +530,4 @@ def call_send_api(message_data):
         logger.error(f"Erreur lors de l'appel à l'API Facebook: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
+
