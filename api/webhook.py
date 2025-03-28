@@ -1,165 +1,112 @@
-from flask import Flask, request, Response
+from flask import Flask, request, jsonify
 import json
 import os
+import sys
 import signal
 import atexit
-import sys
-from src.config import verify_webhook
-from src.messenger_api import handle_message
-from dotenv import load_dotenv
-from src.utils.logger import get_logger
 
-# Importer la fonction pour arrêter proprement le thread de téléchargement
+# Ajouter le répertoire parent au chemin pour les imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.messenger_api import handle_message
+from src.utils.logger import get_logger
+from src.database import connect_to_database
+from src.conversation_memory import clear_old_histories
 from src.youtube_api import stop_download_thread
 
-# Configurer le logger
 logger = get_logger(__name__)
-
-# Charger les variables d'environnement
-load_dotenv()
 
 app = Flask(__name__)
 
-# Ajouter une route pour la racine pour les vérifications de santé
-@app.route('/', methods=['GET', 'HEAD'])
-def root():
+# Connecter à la base de données au démarrage
+@app.before_first_request
+def before_first_request():
     """
-    Endpoint racine pour les vérifications de santé
+    Initialise les connexions et ressources nécessaires avant la première requête
     """
-    return Response("Service is running", status=200)
-
-@app.route('/api/webhook', methods=['GET'])
-def webhook_verification():
-    """
-    Endpoint pour la vérification du webhook par Facebook
-    """
-    print("Requête GET reçue pour la vérification du webhook")
-    logger.info("Requête GET reçue pour la vérification du webhook")
-    return verify_webhook(request)
-
-@app.route('/api/webhook', methods=['POST'])
-def webhook_handler():
-    """
-    Endpoint pour recevoir les événements du webhook
-    """
-    print("Requête POST reçue du webhook")
-    logger.info("Requête POST reçue du webhook")
-    data = request.json
-    print(f"Corps de la requête: {json.dumps(data)}")
-    logger.info(f"Corps de la requête: {json.dumps(data)}")
+    logger.info("Initialisation de l'application...")
     
-    if data.get('object') == 'page':
-        print("Événement de page reçu")
-        logger.info("Événement de page reçu")
-        for entry in data.get('entry', []):
-            print(f"Entrée reçue: {json.dumps(entry)}")
-            logger.info(f"Entrée reçue: {json.dumps(entry)}")
-            messaging = entry.get('messaging', [])
-            if messaging:
-                webhook_event = messaging[0]
-                print(f"Événement Webhook reçu: {json.dumps(webhook_event)}")
-                logger.info(f"Événement Webhook reçu: {json.dumps(webhook_event)}")
-                
-                sender_id = webhook_event.get('sender', {}).get('id')
-                print(f"ID de l'expéditeur: {sender_id}")
-                logger.info(f"ID de l'expéditeur: {sender_id}")
-                
-                if webhook_event.get('message'):
-                    print("Message reçu, appel de handle_message")
-                    logger.info("Message reçu, appel de handle_message")
-                    try:
-                        handle_message(sender_id, webhook_event.get('message'))
-                        print("handle_message terminé avec succès")
-                        logger.info("handle_message terminé avec succès")
-                    except Exception as e:
-                        print(f"Erreur lors du traitement du message: {str(e)}")
-                        logger.error(f"Erreur lors du traitement du message: {str(e)}", exc_info=True)
-                elif webhook_event.get('postback'):
-                    print(f"Postback reçu: {json.dumps(webhook_event.get('postback'))}")
-                    logger.info(f"Postback reçu: {json.dumps(webhook_event.get('postback'))}")
-                    try:
-                        handle_message(sender_id, {'postback': webhook_event.get('postback')})
-                        print("handle_message pour postback terminé avec succès")
-                        logger.info("handle_message pour postback terminé avec succès")
-                    except Exception as e:
-                        print(f"Erreur lors du traitement du postback: {str(e)}")
-                        logger.error(f"Erreur lors du traitement du postback: {str(e)}", exc_info=True)
-                else:
-                    print(f"Événement non reconnu: {webhook_event}")
-                    logger.warning(f"Événement non reconnu: {webhook_event}")
-            else:
-                print("Aucun événement de messagerie dans cette entrée")
-                logger.info("Aucun événement de messagerie dans cette entrée")
-        
-        return Response("EVENT_RECEIVED", status=200)
+    # Connecter à la base de données
+    db = connect_to_database()
+    if not db:
+        logger.error("Impossible de se connecter à la base de données")
     else:
-        print("Requête non reconnue reçue")
-        logger.warning("Requête non reconnue reçue")
-        return Response(status=404)
+        logger.info("Connexion à la base de données établie")
+    
+    # Nettoyer les anciens historiques
+    clear_old_histories()
+    logger.info("Nettoyage des anciens historiques terminé")
 
-@app.route('/healthz', methods=['GET', 'HEAD'])
+@app.route('/webhook', methods=['GET', 'POST'])
+def webhook():
+    """
+    Point d'entrée pour le webhook Facebook Messenger
+    """
+    if request.method == 'GET':
+        # Vérification du webhook par Facebook
+        verify_token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
+        
+        if verify_token == os.environ.get('MESSENGER_VERIFY_TOKEN'):
+            logger.info("Vérification du webhook réussie")
+            return challenge
+        else:
+            logger.warning(f"Vérification du webhook échouée: token invalide {verify_token}")
+            return 'Invalid verification token'
+    
+    elif request.method == 'POST':
+        # Traitement des messages entrants
+        data = request.json
+        logger.info(f"Webhook POST reçu: {json.dumps(data)}")
+        
+        if data.get('object') == 'page':
+            for entry in data.get('entry', []):
+                for messaging_event in entry.get('messaging', []):
+                    sender_id = messaging_event.get('sender', {}).get('id')
+                    
+                    if not sender_id:
+                        logger.warning("Événement sans sender_id")
+                        continue
+                    
+                    if 'message' in messaging_event:
+                        handle_message(sender_id, messaging_event['message'])
+                    elif 'postback' in messaging_event:
+                        handle_message(sender_id, {'postback': messaging_event['postback']})
+        
+        return 'EVENT_RECEIVED'
+
+@app.route('/healthz', methods=['GET'])
 def health_check():
     """
     Point d'entrée pour la vérification de santé
     """
-    logger.info("Vérification de santé demandée")
-    return Response("OK", status=200)
-
-# Modifier le gestionnaire d'erreurs pour ignorer les 404 sur les routes de surveillance
-@app.errorhandler(404)
-def handle_404(e):
-    # Vérifier si c'est une requête de surveillance
-    if request.path == '/' or request.path == '/healthz':
-        logger.info(f"Requête de surveillance reçue sur {request.path}")
-        return Response("Service is running", status=200)
+    # Vérifier la connexion à la base de données
+    from src.database import get_database
+    db = get_database()
     
-    # Pour les autres 404, journaliser comme avertissement et non comme erreur
-    logger.warning(f"Route non trouvée: {request.path}")
-    return Response("Not Found", status=404)
-
-@app.errorhandler(Exception)
-def handle_error(e):
-    # Ne pas traiter les 404 comme des erreurs critiques
-    if isinstance(e, werkzeug.exceptions.NotFound):
-        return handle_404(e)
-        
-    print(f"Erreur non gérée: {str(e)}")
-    logger.error(f"Erreur non gérée: {str(e)}", exc_info=True)
-    return Response("Quelque chose s'est mal passé!", status=500)
+    if db is not None:
+        return jsonify({"status": "healthy", "database": "connected"})
+    else:
+        return jsonify({"status": "unhealthy", "database": "disconnected"}), 500
 
 # Gestionnaire de signal pour arrêter proprement les threads
 def signal_handler(signum, frame):
-    print(f"Signal reçu par l'application: {signum}")
     logger.info(f"Signal reçu par l'application: {signum}")
-    
-    # Arrêter proprement le thread de téléchargement
-    stop_download_thread()
-    
-    # Si c'est un signal de terminaison, quitter l'application
-    if signum in (signal.SIGTERM, signal.SIGINT):
-        print("Arrêt de l'application demandé")
-        logger.info("Arrêt de l'application demandé")
-        sys.exit(0)
-
-# Fonction d'arrêt propre
-def cleanup():
-    print("Nettoyage avant l'arrêt de l'application")
-    logger.info("Nettoyage avant l'arrêt de l'application")
     stop_download_thread()
 
 # Enregistrer les gestionnaires de signal
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+# Fonction d'arrêt propre
+def cleanup():
+    logger.info("Nettoyage avant l'arrêt de l'application")
+    stop_download_thread()
+
 # Enregistrer la fonction de nettoyage
 atexit.register(cleanup)
 
-# Pour le déploiement sur Render
 if __name__ == '__main__':
-    # Initialisation au démarrage
-    print("Démarrage de l'application...")
-    logger.info("Démarrage de l'application...")
-    
-    # Démarrer le serveur
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+
