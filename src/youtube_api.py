@@ -442,7 +442,6 @@ def download_video(video_id, output_path):
         
         # Construire l'URL YouTube complète
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        encoded_url = quote(youtube_url)
         
         # Utiliser l'API RapidAPI pour obtenir les informations de la vidéo
         url = f"https://{RAPIDAPI_HOST}/ajax/api.php"
@@ -465,80 +464,111 @@ def download_video(video_id, output_path):
             return f"https://www.youtube.com/watch?v={video_id}"
         
         try:
+            # Analyser la réponse JSON
             data = response.json()
             logger.info(f"Réponse de l'API RapidAPI: {json.dumps(data)[:500]}...")  # Limiter la taille du log
-        except json.JSONDecodeError:
-            logger.error(f"Erreur lors du décodage de la réponse JSON: {response.text[:500]}...")
-            return f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Vérifier si la réponse contient des liens de téléchargement
-        if not data.get('links') or not isinstance(data.get('links'), list) or len(data.get('links')) == 0:
-            logger.error("Aucun lien de téléchargement trouvé dans la réponse de l'API")
-            return f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Trouver le meilleur lien de téléchargement (préférer MP4 avec la meilleure qualité)
-        download_link = None
-        best_quality = 0
-        
-        for link in data.get('links'):
-            if link.get('type') == 'mp4' and link.get('quality') and link.get('url'):
-                quality = int(link.get('quality').replace('p', ''))
-                if quality > best_quality and quality <= 720:  # Limiter à 720p pour éviter les fichiers trop volumineux
-                    best_quality = quality
-                    download_link = link.get('url')
-        
-        if not download_link:
-            # Si aucun lien MP4 n'est trouvé, prendre le premier lien disponible
-            for link in data.get('links'):
-                if link.get('url'):
-                    download_link = link.get('url')
-                    break
-        
-        if not download_link:
-            logger.error("Aucun lien de téléchargement valide trouvé")
-            return f"https://www.youtube.com/watch?v={video_id}"
-        
-        logger.info(f"Lien de téléchargement trouvé: {download_link}")
-        
-        # Télécharger le fichier
-        try:
-            logger.info(f"Téléchargement du fichier depuis: {download_link}")
-            file_response = requests.get(download_link, stream=True, timeout=60)
             
-            if file_response.status_code != 200:
-                logger.error(f"Erreur lors du téléchargement du fichier: {file_response.status_code}")
+            # Vérifier si la réponse est réussie
+            if not data.get('successfull'):
+                logger.error(f"Erreur dans la réponse de l'API: {data}")
                 return f"https://www.youtube.com/watch?v={video_id}"
             
-            # Écrire le fichier sur le disque
-            with open(output_path, 'wb') as f:
-                for chunk in file_response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            # Vérifier si le fichier a été téléchargé correctement
-            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+            # Extraire et parser la chaîne JSON du champ "info"
+            info_str = data.get('info')
+            if not info_str:
+                logger.error("Champ 'info' manquant dans la réponse de l'API")
                 return f"https://www.youtube.com/watch?v={video_id}"
             
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
-            
-            # Vérifier la taille du fichier
-            if file_size < 10000:  # Moins de 10 Ko
-                logger.warning(f"Le fichier téléchargé est trop petit: {file_size} octets")
-                return f"https://www.youtube.com/watch?v={video_id}"
-            
-            # Ajouter la vidéo au cache
             try:
-                import shutil
-                shutil.copy2(output_path, cache_path)
-                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+                info = json.loads(info_str)
+                logger.info(f"Informations de la vidéo extraites: {json.dumps(info)[:500]}...")
+            except json.JSONDecodeError:
+                logger.error(f"Erreur lors du décodage du champ 'info': {info_str[:500]}...")
+                return f"https://www.youtube.com/watch?v={video_id}"
             
-            return output_path
+            # Vérifier si le champ "formats" existe
+            formats = info.get('formats')
+            if not formats or not isinstance(formats, list) or len(formats) == 0:
+                logger.error("Aucun format de téléchargement trouvé dans la réponse de l'API")
+                return f"https://www.youtube.com/watch?v={video_id}"
+            
+            # Trouver le meilleur format de téléchargement (préférer MP4 avec la meilleure qualité)
+            download_url = None
+            best_quality = 0
+            
+            # Chercher d'abord les formats MP4 avec une URL directe
+            for format_info in formats:
+                if format_info.get('ext') == 'mp4' and format_info.get('url') and format_info.get('height'):
+                    height = format_info.get('height')
+                    if height > best_quality and height <= 720:  # Limiter à 720p
+                        best_quality = height
+                        download_url = format_info.get('url')
+            
+            # Si aucun format MP4 n'est trouvé, chercher n'importe quel format avec une URL
+            if not download_url:
+                for format_info in formats:
+                    if format_info.get('url') and format_info.get('height'):
+                        height = format_info.get('height')
+                        if height > best_quality and height <= 720:  # Limiter à 720p
+                            best_quality = height
+                            download_url = format_info.get('url')
+            
+            # Si toujours aucune URL n'est trouvée, prendre la première URL disponible
+            if not download_url:
+                for format_info in formats:
+                    if format_info.get('url'):
+                        download_url = format_info.get('url')
+                        break
+            
+            if not download_url:
+                logger.error("Aucune URL de téléchargement trouvée dans les formats disponibles")
+                return f"https://www.youtube.com/watch?v={video_id}"
+            
+            logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
+            
+            # Télécharger le fichier
+            try:
+                logger.info(f"Téléchargement du fichier depuis l'URL trouvée...")
+                file_response = requests.get(download_url, stream=True, timeout=60)
+                
+                if file_response.status_code != 200:
+                    logger.error(f"Erreur lors du téléchargement du fichier: {file_response.status_code}")
+                    return f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Écrire le fichier sur le disque
+                with open(output_path, 'wb') as f:
+                    for chunk in file_response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                # Vérifier si le fichier a été téléchargé correctement
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                    return f"https://www.youtube.com/watch?v={video_id}"
+                
+                file_size = os.path.getsize(output_path)
+                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
+                
+                # Vérifier la taille du fichier
+                if file_size < 10000:  # Moins de 10 Ko
+                    logger.warning(f"Le fichier téléchargé est trop petit: {file_size} octets")
+                    return f"https://www.youtube.com/watch?v={video_id}"
+                
+                # Ajouter la vidéo au cache
+                try:
+                    import shutil
+                    shutil.copy2(output_path, cache_path)
+                    logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+                
+                return output_path
+            except Exception as e:
+                logger.error(f"Erreur lors du téléchargement du fichier: {str(e)}")
+                logger.error(traceback.format_exc())
+                return f"https://www.youtube.com/watch?v={video_id}"
         except Exception as e:
-            logger.error(f"Erreur lors du téléchargement du fichier: {str(e)}")
+            logger.error(f"Erreur lors du traitement de la réponse de l'API: {str(e)}")
             logger.error(traceback.format_exc())
             return f"https://www.youtube.com/watch?v={video_id}"
     except Exception as e:
