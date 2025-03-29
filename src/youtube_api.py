@@ -36,6 +36,7 @@ if not os.path.exists(CACHE_DIR):
 # Clé API RapidAPI
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
 RAPIDAPI_HOST = os.environ.get('RAPIDAPI_HOST', "youtube-media-downloader.p.rapidapi.com")
+YTSTREAM_HOST = "ytstream-download-youtube-videos.p.rapidapi.com"
 
 def extract_video_id(url_or_id):
     """
@@ -444,6 +445,108 @@ def is_valid_mp4(file_path):
         logger.error(f"Erreur lors de la vérification du fichier MP4: {str(e)}")
         return False
 
+def download_with_ytstream(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube en utilisant l'API YTStream RapidAPI
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Téléchargement de la vidéo avec l'API YTStream: {video_id}")
+        
+        # Vérifier si la clé API RapidAPI est disponible
+        if not RAPIDAPI_KEY:
+            logger.error("Clé API RapidAPI manquante")
+            return None
+        
+        # Utiliser l'API YTStream pour télécharger la vidéo
+        conn = http.client.HTTPSConnection(YTSTREAM_HOST)
+        
+        headers = {
+            'x-rapidapi-key': RAPIDAPI_KEY,
+            'x-rapidapi-host': YTSTREAM_HOST
+        }
+        
+        conn.request("GET", f"/dl?id={video_id}", headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Erreur lors de l'appel à l'API YTStream: {res.status} - {data.decode('utf-8')}")
+            return None
+        
+        try:
+            result = json.loads(data.decode("utf-8"))
+            logger.info(f"Réponse de l'API YTStream: {json.dumps(result)[:500]}...")
+        except json.JSONDecodeError:
+            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
+            return None
+        
+        # Trouver la meilleure qualité disponible (MP4 uniquement, max 720p)
+        best_quality = None
+        best_url = None
+        
+        # Parcourir les formats disponibles
+        for quality, formats in result.get('links', {}).items():
+            if 'mp4' in formats:
+                # Extraire la hauteur (720, 480, etc.)
+                try:
+                    height = int(re.search(r'(\d+)p', quality).group(1))
+                    if height <= 720 and (best_quality is None or height > best_quality):
+                        best_quality = height
+                        best_url = formats['mp4'].get('url')
+                except (ValueError, AttributeError, KeyError):
+                    continue
+        
+        if not best_url:
+            logger.error("Aucun format MP4 trouvé dans la réponse de l'API YTStream")
+            return None
+        
+        logger.info(f"Meilleure qualité trouvée: {best_quality}p")
+        
+        # Télécharger la vidéo
+        try:
+            response = requests.get(best_url, stream=True, timeout=60)
+            
+            if response.status_code != 200:
+                logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
+                return None
+            
+            # Écrire le fichier sur le disque
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Vérifier si le fichier a été téléchargé correctement
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                return None
+            
+            file_size = os.path.getsize(output_path)
+            logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
+            
+            # Vérifier si le fichier est un MP4 valide
+            if not is_valid_mp4(output_path):
+                logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                return None
+            
+            return output_path
+        except Exception as e:
+            logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement avec l'API YTStream: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 def download_with_new_rapidapi(video_id, output_path):
     """
     Télécharge une vidéo YouTube en utilisant la nouvelle API RapidAPI
@@ -732,7 +835,22 @@ def download_video(video_id, output_path):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # Utiliser la nouvelle API RapidAPI pour télécharger la vidéo
+        # Méthode 1: Télécharger avec YTStream RapidAPI
+        logger.info("Utilisation de l'API YTStream pour télécharger la vidéo")
+        result = download_with_ytstream(video_id, output_path)
+        
+        if result and os.path.exists(result) and is_valid_mp4(result):
+            # Ajouter la vidéo au cache
+            try:
+                import shutil
+                shutil.copy2(result, cache_path)
+                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+            
+            return result
+            
+        # Méthode 2: Télécharger avec la nouvelle API RapidAPI
         logger.info("Utilisation de la nouvelle API RapidAPI pour télécharger la vidéo")
         result = download_with_new_rapidapi(video_id, output_path)
         
@@ -747,7 +865,7 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Si la nouvelle API échoue, essayer avec l'ancienne API RapidAPI
+        # Méthode 3: Utiliser l'ancienne API RapidAPI
         logger.info("La nouvelle API a échoué, tentative avec l'ancienne API RapidAPI")
         
         # Vérifier si la clé API RapidAPI est disponible
