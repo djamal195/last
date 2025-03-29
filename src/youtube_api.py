@@ -789,18 +789,21 @@ def download_video(video_id, output_path):
                 logger.error(f"Erreur dans la réponse de l'API: {data}")
                 return f"https://www.youtube.com/watch?v={video_id}"
             
-            # Extraire et parser la chaîne JSON du champ "info"
-            info_str = data.get('info')
-            if not info_str:
+            # Extraire les informations de la vidéo
+            info = data.get('info')
+            if not info:
                 logger.error("Champ 'info' manquant dans la réponse de l'API")
                 return f"https://www.youtube.com/watch?v={video_id}"
             
-            try:
-                info = json.loads(info_str)
-                logger.info(f"Informations de la vidéo extraites: {json.dumps(info)[:500]}...")
-            except json.JSONDecodeError:
-                logger.error(f"Erreur lors du décodage du champ 'info': {info_str[:500]}...")
-                return f"https://www.youtube.com/watch?v={video_id}"
+            # Vérifier si info est une chaîne (ancien format) ou un dictionnaire (nouveau format)
+            if isinstance(info, str):
+                try:
+                    info = json.loads(info)
+                except json.JSONDecodeError:
+                    logger.error(f"Erreur lors du décodage du champ 'info': {info[:500]}...")
+                    return f"https://www.youtube.com/watch?v={video_id}"
+            
+            logger.info(f"Informations de la vidéo extraites: {json.dumps(info)[:500] if isinstance(info, dict) else info[:500]}...")
             
             # Vérifier si le champ "formats" existe
             formats = info.get('formats')
