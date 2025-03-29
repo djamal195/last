@@ -7,6 +7,7 @@ import traceback
 import subprocess
 import tempfile
 import requests
+import http.client
 from typing import Dict, Any, List, Optional, Callable
 from urllib.parse import urlparse, parse_qs, quote
 from src.utils.logger import get_logger
@@ -34,7 +35,7 @@ if not os.path.exists(CACHE_DIR):
 
 # Clé API RapidAPI
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
-RAPIDAPI_HOST = os.environ.get('RAPIDAPI_HOST', "youtube-info-download-api.p.rapidapi.com")
+RAPIDAPI_HOST = os.environ.get('RAPIDAPI_HOST', "youtube-media-downloader.p.rapidapi.com")
 
 def extract_video_id(url_or_id):
     """
@@ -221,61 +222,47 @@ def search_youtube(query, max_results=10):
             except Exception as e:
                 logger.error(f"Erreur lors de l'appel à l'API YouTube: {str(e)}")
         
-        # Méthode alternative: utiliser youtube-dl pour la recherche
+        # Méthode alternative: utiliser RapidAPI pour la recherche
         try:
-            # Créer un répertoire temporaire pour les résultats
-            with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as temp_file:
-                temp_path = temp_file.name
+            conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
             
-            # Exécuter youtube-dl pour la recherche
-            command = [
-                'yt-dlp',
-                '--dump-json',
-                '--default-search', 'ytsearch',
-                '--no-playlist',
-                '--flat-playlist',
-                f'ytsearch{max_results}:{query}'
-            ]
+            headers = {
+                'x-rapidapi-key': RAPIDAPI_KEY,
+                'x-rapidapi-host': RAPIDAPI_HOST
+            }
             
-            logger.info(f"Exécution de la commande: {' '.join(command)}")
+            encoded_query = quote(query)
+            conn.request("GET", f"/search?query={encoded_query}", headers=headers)
             
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            res = conn.getresponse()
+            data = res.read()
             
-            stdout, stderr = process.communicate()
-            
-            if process.returncode != 0:
-                logger.warning(f"Erreur lors de l'exécution de yt-dlp: {stderr}")
-                raise Exception(f"Erreur yt-dlp: {stderr}")
-            
-            # Traiter les résultats
-            videos = []
-            for line in stdout.splitlines():
-                if line.strip():
-                    try:
-                        data = json.loads(line)
-                        video_id = data.get('id')
+            if res.status == 200:
+                try:
+                    search_results = json.loads(data.decode("utf-8"))
+                    
+                    videos = []
+                    for item in search_results.get('videos', []):
+                        video_id = item.get('id')
                         
                         if video_id:
                             videos.append({
                                 'videoId': video_id,
-                                'title': data.get('title', ''),
-                                'description': data.get('description', ''),
-                                'thumbnail': data.get('thumbnail', f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"),
-                                'channelTitle': data.get('channel', ''),
-                                'publishedAt': data.get('upload_date', '')
+                                'title': item.get('title', ''),
+                                'description': item.get('description', ''),
+                                'thumbnail': item.get('thumbnail', f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"),
+                                'channelTitle': item.get('channel', {}).get('name', ''),
+                                'publishedAt': item.get('uploadDate', '')
                             })
-                    except json.JSONDecodeError:
-                        logger.warning(f"Impossible de décoder la ligne JSON: {line}")
-            
-            logger.info(f"Résultats de la recherche yt-dlp: {len(videos)} vidéos trouvées")
-            return videos
+                    
+                    logger.info(f"Résultats de la recherche RapidAPI: {len(videos)} vidéos trouvées")
+                    return videos
+                except json.JSONDecodeError:
+                    logger.warning(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
+            else:
+                logger.warning(f"Erreur lors de la recherche RapidAPI: {res.status} - {data.decode('utf-8')}")
         except Exception as e:
-            logger.error(f"Erreur lors de la recherche avec yt-dlp: {str(e)}")
+            logger.error(f"Erreur lors de la recherche avec RapidAPI: {str(e)}")
             logger.error(traceback.format_exc())
         
         # Si tout échoue, retourner une liste vide
@@ -457,6 +444,187 @@ def is_valid_mp4(file_path):
         logger.error(f"Erreur lors de la vérification du fichier MP4: {str(e)}")
         return False
 
+def download_with_new_rapidapi(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube en utilisant la nouvelle API RapidAPI
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Téléchargement de la vidéo avec la nouvelle API RapidAPI: {video_id}")
+        
+        # Vérifier si la clé API RapidAPI est disponible
+        if not RAPIDAPI_KEY:
+            logger.error("Clé API RapidAPI manquante")
+            return None
+        
+        # Utiliser l'API RapidAPI pour obtenir les liens de téléchargement
+        conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
+        
+        headers = {
+            'x-rapidapi-key': RAPIDAPI_KEY,
+            'x-rapidapi-host': RAPIDAPI_HOST
+        }
+        
+        # Obtenir les liens de téléchargement
+        conn.request("GET", f"/video/info?videoId={video_id}", headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Erreur lors de l'appel à l'API RapidAPI (info): {res.status} - {data.decode('utf-8')}")
+            return None
+        
+        try:
+            video_info = json.loads(data.decode("utf-8"))
+            logger.info(f"Informations de la vidéo récupérées: {json.dumps(video_info)[:500]}...")
+        except json.JSONDecodeError:
+            logger.error(f"Impossible de décoder la réponse JSON (info): {data.decode('utf-8')[:500]}")
+            return None
+        
+        # Obtenir les liens de téléchargement
+        conn.request("GET", f"/video/formats?videoId={video_id}", headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Erreur lors de l'appel à l'API RapidAPI (formats): {res.status} - {data.decode('utf-8')}")
+            return None
+        
+        try:
+            formats = json.loads(data.decode("utf-8"))
+            logger.info(f"Formats de la vidéo récupérés: {json.dumps(formats)[:500]}...")
+        except json.JSONDecodeError:
+            logger.error(f"Impossible de décoder la réponse JSON (formats): {data.decode('utf-8')[:500]}")
+            return None
+        
+        # Trouver le meilleur format MP4
+        download_url = None
+        best_quality = 0
+        
+        for format_item in formats.get('formats', []):
+            if format_item.get('mimeType', '').startswith('video/mp4') and format_item.get('url'):
+                height = format_item.get('height', 0)
+                if height > best_quality and height <= 720:  # Limiter à 720p
+                    best_quality = height
+                    download_url = format_item.get('url')
+        
+        if not download_url:
+            logger.error("Aucun format MP4 trouvé")
+            return None
+        
+        logger.info(f"Meilleur format MP4 trouvé: {best_quality}p")
+        
+        # Télécharger la vidéo
+        try:
+            response = requests.get(download_url, stream=True, timeout=60)
+            
+            if response.status_code != 200:
+                logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
+                return None
+            
+            # Écrire le fichier sur le disque
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Vérifier si le fichier a été téléchargé correctement
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                return None
+            
+            file_size = os.path.getsize(output_path)
+            logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
+            
+            # Vérifier si le fichier est un MP4 valide
+            if not is_valid_mp4(output_path):
+                logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                return None
+            
+            return output_path
+        except Exception as e:
+            logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement avec la nouvelle API RapidAPI: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def download_hls_with_ffmpeg(hls_url, output_path):
+    """
+    Télécharge un flux HLS avec ffmpeg et le convertit en MP4
+    
+    Args:
+        hls_url: URL du flux HLS
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Téléchargement du flux HLS avec ffmpeg: {hls_url[:100]}...")
+        
+        # Vérifier si ffmpeg est installé
+        try:
+            subprocess.run(['ffmpeg', '-version'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.error("ffmpeg n'est pas installé ou n'est pas accessible")
+            return None
+        
+        # Télécharger et convertir le flux HLS en MP4
+        command = [
+            'ffmpeg',
+            '-i', hls_url,
+            '-c', 'copy',  # Copier les flux sans réencodage
+            '-bsf:a', 'aac_adtstoasc',  # Filtre pour l'audio AAC
+            '-movflags', 'faststart',  # Optimiser pour la lecture en streaming
+            '-y',  # Écraser le fichier de sortie s'il existe
+            output_path
+        ]
+        
+        logger.info(f"Exécution de la commande ffmpeg: {' '.join(command[:3])} [...] {output_path}")
+        
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            logger.error(f"Erreur lors de l'exécution de ffmpeg: {stderr}")
+            return None
+        
+        # Vérifier si le fichier a été téléchargé correctement
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+            return None
+        
+        file_size = os.path.getsize(output_path)
+        logger.info(f"Flux HLS téléchargé et converti avec succès: {output_path} ({file_size} octets)")
+        
+        # Vérifier si le fichier est un MP4 valide
+        if not is_valid_mp4(output_path):
+            logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+            return None
+        
+        return output_path
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement du flux HLS: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 def download_with_ytdlp(video_id, output_path):
     """
     Télécharge une vidéo YouTube en utilisant yt-dlp
@@ -564,9 +732,9 @@ def download_video(video_id, output_path):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # Utiliser directement yt-dlp pour télécharger la vidéo
-        logger.info("Utilisation de yt-dlp pour télécharger la vidéo")
-        result = download_with_ytdlp(video_id, output_path)
+        # Utiliser la nouvelle API RapidAPI pour télécharger la vidéo
+        logger.info("Utilisation de la nouvelle API RapidAPI pour télécharger la vidéo")
+        result = download_with_new_rapidapi(video_id, output_path)
         
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
@@ -579,8 +747,8 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Si yt-dlp échoue, essayer avec l'API RapidAPI
-        logger.info("yt-dlp a échoué, tentative avec l'API RapidAPI")
+        # Si la nouvelle API échoue, essayer avec l'ancienne API RapidAPI
+        logger.info("La nouvelle API a échoué, tentative avec l'ancienne API RapidAPI")
         
         # Vérifier si la clé API RapidAPI est disponible
         if not RAPIDAPI_KEY:
@@ -591,7 +759,8 @@ def download_video(video_id, output_path):
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
         
         # Utiliser l'API RapidAPI pour obtenir les informations de la vidéo
-        url = f"https://{RAPIDAPI_HOST}/ajax/api.php"
+        old_host = "youtube-info-download-api.p.rapidapi.com"
+        url = f"https://{old_host}/ajax/api.php"
         
         querystring = {
             "function": "i",
@@ -600,20 +769,20 @@ def download_video(video_id, output_path):
         
         headers = {
             "X-RapidAPI-Key": RAPIDAPI_KEY,
-            "X-RapidAPI-Host": RAPIDAPI_HOST
+            "X-RapidAPI-Host": old_host
         }
         
-        logger.info(f"Appel de l'API RapidAPI pour la vidéo: {video_id}")
+        logger.info(f"Appel de l'ancienne API RapidAPI pour la vidéo: {video_id}")
         response = requests.get(url, headers=headers, params=querystring)
         
         if response.status_code != 200:
-            logger.error(f"Erreur lors de l'appel à l'API RapidAPI: {response.status_code} - {response.text}")
+            logger.error(f"Erreur lors de l'appel à l'ancienne API RapidAPI: {response.status_code} - {response.text}")
             return f"https://www.youtube.com/watch?v={video_id}"
         
         try:
             # Analyser la réponse JSON
             data = response.json()
-            logger.info(f"Réponse de l'API RapidAPI: {json.dumps(data)[:500]}...")  # Limiter la taille du log
+            logger.info(f"Réponse de l'ancienne API RapidAPI: {json.dumps(data)[:500]}...")  # Limiter la taille du log
             
             # Vérifier si la réponse est réussie
             if not data.get('successfull'):
@@ -675,8 +844,27 @@ def download_video(video_id, output_path):
             
             # Vérifier si l'URL est une URL HLS (manifest.googlevideo.com)
             if "manifest.googlevideo.com" in download_url or "hls_playlist" in download_url:
-                logger.info("URL HLS détectée, utilisation de yt-dlp pour le téléchargement")
-                return download_with_ytdlp(video_id, output_path)
+                logger.info("URL HLS détectée, tentative de téléchargement avec ffmpeg")
+                result = download_hls_with_ffmpeg(download_url, output_path)
+                
+                if result and os.path.exists(result) and is_valid_mp4(result):
+                    # Ajouter la vidéo au cache
+                    try:
+                        import shutil
+                        shutil.copy2(result, cache_path)
+                        logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+                    except Exception as e:
+                        logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+                    
+                    return result
+                else:
+                    logger.warning("Échec du téléchargement HLS avec ffmpeg, tentative avec yt-dlp")
+                    result = download_with_ytdlp(video_id, output_path)
+                    
+                    if result and os.path.exists(result) and is_valid_mp4(result):
+                        return result
+                    else:
+                        return f"https://www.youtube.com/watch?v={video_id}"
             
             # Télécharger le fichier
             try:
@@ -703,8 +891,8 @@ def download_video(video_id, output_path):
                 
                 # Vérifier si le fichier est un MP4 valide
                 if not is_valid_mp4(output_path):
-                    logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide, utilisation de yt-dlp")
-                    return download_with_ytdlp(video_id, output_path)
+                    logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide")
+                    return f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Ajouter la vidéo au cache
                 try:
