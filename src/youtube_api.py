@@ -492,20 +492,49 @@ def download_with_ytstream(video_id, output_path):
         best_quality = None
         best_url = None
         
-        # Parcourir les formats disponibles
-        for quality, formats in result.get('links', {}).items():
-            if 'mp4' in formats:
-                # Extraire la hauteur (720, 480, etc.)
-                try:
-                    height = int(re.search(r'(\d+)p', quality).group(1))
-                    if height <= 720 and (best_quality is None or height > best_quality):
-                        best_quality = height
-                        best_url = formats['mp4'].get('url')
-                except (ValueError, AttributeError, KeyError):
-                    continue
+        logger.info(f"Structure de la réponse YTStream: {json.dumps(list(result.keys()))}")
+        
+        # Vérifier si la structure contient des liens
+        if 'links' in result:
+            # Parcourir les formats disponibles
+            for quality, formats in result.get('links', {}).items():
+                logger.info(f"Qualité disponible: {quality}, formats: {list(formats.keys()) if isinstance(formats, dict) else 'non-dict'}")
+                if isinstance(formats, dict) and 'mp4' in formats:
+                    # Extraire la hauteur (720, 480, etc.)
+                    try:
+                        height = int(re.search(r'(\d+)p', quality).group(1))
+                        if height <= 720 and (best_quality is None or height > best_quality):
+                            best_quality = height
+                            best_url = formats['mp4'].get('url')
+                            logger.info(f"Meilleur format trouvé jusqu'à présent: {height}p")
+                    except (ValueError, AttributeError, KeyError) as e:
+                        logger.warning(f"Erreur lors de l'analyse de la qualité {quality}: {str(e)}")
+                        continue
+        
+        # Si aucun format MP4 n'est trouvé, chercher directement dans les URLs
+        if not best_url and 'url' in result:
+            logger.info("Aucun format MP4 trouvé dans 'links', recherche dans 'url'")
+            if isinstance(result['url'], str):
+                best_url = result['url']
+                logger.info(f"URL directe trouvée: {best_url[:100]}...")
+            elif isinstance(result['url'], dict):
+                # Parcourir les URLs disponibles
+                for quality, url in result['url'].items():
+                    if isinstance(url, str) and url.endswith('.mp4'):
+                        try:
+                            height = int(re.search(r'(\d+)p', quality).group(1))
+                            if height <= 720 and (best_quality is None or height > best_quality):
+                                best_quality = height
+                                best_url = url
+                                logger.info(f"Meilleur format trouvé dans 'url': {height}p")
+                        except (ValueError, AttributeError) as e:
+                            logger.warning(f"Erreur lors de l'analyse de la qualité {quality}: {str(e)}")
+                            continue
         
         if not best_url:
-            logger.error("Aucun format MP4 trouvé dans la réponse de l'API YTStream")
+            logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API YTStream")
+            # Afficher toute la réponse pour le débogage
+            logger.error(f"Réponse complète: {json.dumps(result)}")
             return None
         
         logger.info(f"Meilleure qualité trouvée: {best_quality}p")
@@ -760,6 +789,11 @@ def download_with_ytdlp(video_id, output_path):
             '--no-part',
             '--no-mtime',
             '--no-progress',
+            '--extractor-retries', '3',
+            '--retry-sleep', '5',
+            '--geo-bypass',
+            '--ignore-errors',
+            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             youtube_url
         ]
         
@@ -895,6 +929,11 @@ def download_video(video_id, output_path):
         
         if response.status_code != 200:
             logger.error(f"Erreur lors de l'appel à l'ancienne API RapidAPI: {response.status_code} - {response.text}")
+            # Essayer directement yt-dlp comme solution de secours
+            logger.info("Tentative avec yt-dlp")
+            result = download_with_ytdlp(video_id, output_path)
+            if result and os.path.exists(result) and is_valid_mp4(result):
+                return result
             return f"https://www.youtube.com/watch?v={video_id}"
         
         try:
