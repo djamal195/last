@@ -6,9 +6,9 @@ import threading
 import traceback
 import subprocess
 import tempfile
+import requests
 from typing import Dict, Any, List, Optional, Callable
 from urllib.parse import urlparse, parse_qs
-import requests
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,6 +31,10 @@ download_thread_running = False
 CACHE_DIR = "/tmp/youtube_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
+
+# Clé API RapidAPI
+RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY')
+RAPIDAPI_HOST = os.environ.get('RAPIDAPI_HOST', 'youtube-mp36.p.rapidapi.com')
 
 def extract_video_id(url_or_id):
     """
@@ -395,7 +399,7 @@ def process_download_queue():
 
 def download_video(video_id, output_path):
     """
-    Télécharge une vidéo YouTube
+    Télécharge une vidéo YouTube en utilisant RapidAPI
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -431,133 +435,82 @@ def download_video(video_id, output_path):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # Télécharger la vidéo avec yt-dlp
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        # Vérifier si la clé API RapidAPI est disponible
+        if not RAPIDAPI_KEY:
+            logger.error("Clé API RapidAPI manquante. Veuillez définir la variable d'environnement RAPIDAPI_KEY.")
+            return f"https://www.youtube.com/watch?v={video_id}"
         
-        # Utiliser yt-dlp pour télécharger la vidéo
-        command = [
-            'yt-dlp',
-            '--format', 'mp4[height<=720]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '--output', output_path,
-            '--no-playlist',
-            '--no-warnings',
-            '--quiet',
-            '--no-check-certificate',
-            '--no-cache-dir',
-            '--progress',
-            '--max-filesize', '50M',  # Taille maximale de 50 Mo
-            '--no-part',  # Ne pas utiliser de fichiers temporaires .part
-            '--no-mtime',  # Ne pas utiliser la date de modification du fichier
-            '--prefer-ffmpeg',  # Préférer ffmpeg pour le post-traitement
-            '--no-hls-use-mpegts',  # Ne pas utiliser MPEG-TS pour les flux HLS
-            url
-        ]
+        # Utiliser l'API RapidAPI pour télécharger la vidéo
+        url = f"https://youtube-mp36.p.rapidapi.com/dl"
         
-        logger.info(f"Exécution de la commande: {' '.join(command)}")
+        querystring = {"id": video_id}
         
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        headers = {
+            "X-RapidAPI-Key": RAPIDAPI_KEY,
+            "X-RapidAPI-Host": RAPIDAPI_HOST
+        }
         
-        stdout, stderr = process.communicate()
+        logger.info(f"Appel de l'API RapidAPI pour la vidéo: {video_id}")
+        response = requests.get(url, headers=headers, params=querystring)
         
-        if process.returncode != 0:
-            logger.warning(f"Erreur lors de l'exécution de yt-dlp: {stderr}")
-            
-            # Vérifier si c'est une erreur de restriction d'âge
-            if "age-restricted" in stderr:
-                logger.warning("Vidéo avec restriction d'âge, tentative avec --age-limit=21")
-                
-                # Réessayer avec --age-limit=21
-                command.append('--age-limit=21')
-                
-                process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                stdout, stderr = process.communicate()
-                
-                if process.returncode != 0:
-                    logger.warning(f"Erreur lors de la seconde tentative: {stderr}")
-                    return url
-            else:
-                return url
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de l'appel à l'API RapidAPI: {response.status_code} - {response.text}")
+            return f"https://www.youtube.com/watch?v={video_id}"
         
-        # Vérifier si le fichier existe et a une taille non nulle
+        data = response.json()
+        logger.info(f"Réponse de l'API RapidAPI: {data}")
+        
+        # Vérifier si la conversion a réussi
+        if data.get('status') != 'ok':
+            logger.error(f"Erreur lors de la conversion de la vidéo: {data.get('msg', 'Erreur inconnue')}")
+            return f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Récupérer l'URL de téléchargement
+        download_url = data.get('link')
+        if not download_url:
+            logger.error("URL de téléchargement manquante dans la réponse de l'API")
+            return f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Télécharger le fichier
+        logger.info(f"Téléchargement du fichier depuis: {download_url}")
+        file_response = requests.get(download_url, stream=True)
+        
+        if file_response.status_code != 200:
+            logger.error(f"Erreur lors du téléchargement du fichier: {file_response.status_code}")
+            return f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Écrire le fichier sur le disque
+        with open(output_path, 'wb') as f:
+            for chunk in file_response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        
+        # Vérifier si le fichier a été téléchargé correctement
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            logger.warning(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-            return url
+            logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+            return f"https://www.youtube.com/watch?v={video_id}"
         
-        # Vérifier la taille du fichier
         file_size = os.path.getsize(output_path)
         logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
         
+        # Vérifier la taille du fichier
         if file_size < 10000:  # Moins de 10 Ko
             logger.warning(f"Le fichier téléchargé est trop petit: {file_size} octets")
-            return url
+            return f"https://www.youtube.com/watch?v={video_id}"
         
-        # Vérifier si le fichier est une vidéo valide
+        # Ajouter la vidéo au cache
         try:
-            # Utiliser ffprobe pour vérifier si le fichier est une vidéo valide
-            command = [
-                'ffprobe',
-                '-v', 'error',
-                '-show_entries', 'stream=codec_type',
-                '-of', 'json',
-                output_path
-            ]
-            
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            stdout, stderr = process.communicate()
-            
-            if process.returncode != 0:
-                logger.warning(f"Erreur lors de la vérification du fichier vidéo: {stderr}")
-                return url
-            
-            # Vérifier si le fichier contient un flux vidéo
-            data = json.loads(stdout)
-            has_video_stream = False
-            
-            for stream in data.get('streams', []):
-                if stream.get('codec_type') == 'video':
-                    has_video_stream = True
-                    break
-            
-            if not has_video_stream:
-                logger.warning("Le fichier ne contient pas de flux vidéo")
-                return url
-            
-            # Ajouter la vidéo au cache
-            try:
-                import shutil
-                shutil.copy2(output_path, cache_path)
-                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
-            
-            logger.info(f"Téléchargement terminé pour la vidéo {video_id}: {output_path}")
-            return output_path
+            import shutil
+            shutil.copy2(output_path, cache_path)
+            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
         except Exception as e:
-            logger.error(f"Erreur lors de la vérification du fichier vidéo: {str(e)}")
-            logger.error(traceback.format_exc())
-            return url
+            logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+        
+        return output_path
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
-        return None
+        return f"https://www.youtube.com/watch?v={video_id}"
 
 
 def stop_download_thread():
