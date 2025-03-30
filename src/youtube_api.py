@@ -491,29 +491,35 @@ def download_with_ytstream(video_id, output_path):
         # Trouver la meilleure qualité disponible (MP4 uniquement, max 720p)
         best_quality = None
         best_url = None
-        
+
         logger.info(f"Structure de la réponse YTStream: {json.dumps(list(result.keys()))}")
-        
-        # Vérifier si la structure contient des liens
-        if 'links' in result:
+
+        # Vérifier si la structure contient des formats directs
+        if 'formats' in result:
+            logger.info(f"Formats trouvés dans la réponse: {json.dumps(result['formats'][:2]) if isinstance(result['formats'], list) else 'non-list'}")
             # Parcourir les formats disponibles
-            for quality, formats in result.get('links', {}).items():
-                logger.info(f"Qualité disponible: {quality}, formats: {list(formats.keys()) if isinstance(formats, dict) else 'non-dict'}")
-                if isinstance(formats, dict) and 'mp4' in formats:
-                    # Extraire la hauteur (720, 480, etc.)
-                    try:
-                        height = int(re.search(r'(\d+)p', quality).group(1))
-                        if height <= 720 and (best_quality is None or height > best_quality):
-                            best_quality = height
-                            best_url = formats['mp4'].get('url')
-                            logger.info(f"Meilleur format trouvé jusqu'à présent: {height}p")
-                    except (ValueError, AttributeError, KeyError) as e:
-                        logger.warning(f"Erreur lors de l'analyse de la qualité {quality}: {str(e)}")
-                        continue
-        
+            for format_item in result.get('formats', []):
+                if isinstance(format_item, dict) and format_item.get('mimeType', '').startswith('video/mp4') and format_item.get('url'):
+                    height = format_item.get('height', 0)
+                    if height <= 720 and (best_quality is None or height > best_quality):
+                        best_quality = height
+                        best_url = format_item.get('url')
+                        logger.info(f"Format MP4 trouvé: {height}p")
+
+        # Vérifier si la structure contient des liens adaptiveFormats
+        if not best_url and 'adaptiveFormats' in result:
+            logger.info(f"AdaptiveFormats trouvés: {len(result['adaptiveFormats'])}")
+            for format_item in result.get('adaptiveFormats', []):
+                if isinstance(format_item, dict) and format_item.get('mimeType', '').startswith('video/mp4') and format_item.get('url'):
+                    height = format_item.get('height', 0)
+                    if height <= 720 and (best_quality is None or height > best_quality):
+                        best_quality = height
+                        best_url = format_item.get('url')
+                        logger.info(f"Format adaptatif MP4 trouvé: {height}p")
+
         # Si aucun format MP4 n'est trouvé, chercher directement dans les URLs
         if not best_url and 'url' in result:
-            logger.info("Aucun format MP4 trouvé dans 'links', recherche dans 'url'")
+            logger.info("Aucun format MP4 trouvé dans 'formats', recherche dans 'url'")
             if isinstance(result['url'], str):
                 best_url = result['url']
                 logger.info(f"URL directe trouvée: {best_url[:100]}...")
@@ -789,11 +795,15 @@ def download_with_ytdlp(video_id, output_path):
             '--no-part',
             '--no-mtime',
             '--no-progress',
-            '--extractor-retries', '3',
+            '--extractor-retries', '5',
             '--retry-sleep', '5',
             '--geo-bypass',
             '--ignore-errors',
+            '--force-ipv4',
             '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            '--referer', 'https://www.youtube.com/',
+            '--add-header', 'Accept-Language: en-US,en;q=0.9',
+            '--cookies-from-browser', 'chrome',
             youtube_url
         ]
         
@@ -810,7 +820,30 @@ def download_with_ytdlp(video_id, output_path):
         
         if process.returncode != 0:
             logger.error(f"Erreur lors de l'exécution de yt-dlp: {stderr}")
-            return None
+            
+            # Essayer une seconde fois avec des options plus simples
+            logger.info("Tentative avec des options yt-dlp simplifiées")
+            simple_command = [
+                'yt-dlp',
+                '--format', 'best[height<=720]/best',
+                '--output', output_path,
+                '--no-playlist',
+                '--geo-bypass',
+                youtube_url
+            ]
+            
+            process = subprocess.Popen(
+                simple_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                logger.error(f"Erreur lors de la seconde tentative avec yt-dlp: {stderr}")
+                return None
         
         # Vérifier si le fichier a été téléchargé correctement
         if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
@@ -883,8 +916,23 @@ def download_video(video_id, output_path):
                 logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
             
             return result
+        
+        # Méthode 2: Essayer directement yt-dlp (plus fiable que les autres méthodes)
+        logger.info("Les APIs ont échoué, tentative avec yt-dlp")
+        result = download_with_ytdlp(video_id, output_path)
+        
+        if result and os.path.exists(result) and is_valid_mp4(result):
+            # Ajouter la vidéo au cache
+            try:
+                import shutil
+                shutil.copy2(result, cache_path)
+                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
             
-        # Méthode 2: Télécharger avec la nouvelle API RapidAPI
+            return result
+            
+        # Méthode 3: Télécharger avec la nouvelle API RapidAPI
         logger.info("Utilisation de la nouvelle API RapidAPI pour télécharger la vidéo")
         result = download_with_new_rapidapi(video_id, output_path)
         
@@ -899,7 +947,7 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Méthode 3: Utiliser l'ancienne API RapidAPI
+        # Méthode 4: Utiliser l'ancienne API RapidAPI
         logger.info("La nouvelle API a échoué, tentative avec l'ancienne API RapidAPI")
         
         # Vérifier si la clé API RapidAPI est disponible
@@ -929,11 +977,7 @@ def download_video(video_id, output_path):
         
         if response.status_code != 200:
             logger.error(f"Erreur lors de l'appel à l'ancienne API RapidAPI: {response.status_code} - {response.text}")
-            # Essayer directement yt-dlp comme solution de secours
-            logger.info("Tentative avec yt-dlp")
-            result = download_with_ytdlp(video_id, output_path)
-            if result and os.path.exists(result) and is_valid_mp4(result):
-                return result
+            # Déjà essayé yt-dlp plus haut, donc retourner simplement l'URL YouTube
             return f"https://www.youtube.com/watch?v={video_id}"
         
         try:
@@ -1018,13 +1062,8 @@ def download_video(video_id, output_path):
                     
                     return result
                 else:
-                    logger.warning("Échec du téléchargement HLS avec ffmpeg, tentative avec yt-dlp")
-                    result = download_with_ytdlp(video_id, output_path)
-                    
-                    if result and os.path.exists(result) and is_valid_mp4(result):
-                        return result
-                    else:
-                        return f"https://www.youtube.com/watch?v={video_id}"
+                    # Déjà essayé yt-dlp plus haut
+                    return f"https://www.youtube.com/watch?v={video_id}"
             
             # Télécharger le fichier
             try:
@@ -1033,6 +1072,7 @@ def download_video(video_id, output_path):
                 
                 if file_response.status_code != 200:
                     logger.error(f"Erreur lors du téléchargement du fichier: {file_response.status_code}")
+                    # Déjà essayé yt-dlp plus haut
                     return f"https://www.youtube.com/watch?v={video_id}"
                 
                 # Écrire le fichier sur le disque
