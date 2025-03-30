@@ -368,6 +368,179 @@ def is_valid_mp4(file_path):
         logger.error(f"Erreur lors de la vérification du fichier MP4: {str(e)}")
         return False
 
+def download_direct_mp4(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube directement en MP4
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Tentative de téléchargement direct MP4 pour: {video_id}")
+        
+        # Utiliser l'API Cloud API Hub pour obtenir le lien direct
+        conn = http.client.HTTPSConnection(CLOUD_API_HUB_HOST)
+        
+        headers = {
+            'x-rapidapi-key': RAPIDAPI_KEY,
+            'x-rapidapi-host': CLOUD_API_HUB_HOST
+        }
+        
+        # Essayer d'abord avec le format direct
+        conn.request("GET", f"/download?id={video_id}", headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Erreur lors de l'appel à l'API Cloud API Hub (direct): {res.status} - {data.decode('utf-8')}")
+            return None
+        
+        try:
+            result = json.loads(data.decode("utf-8"))
+            logger.info(f"Réponse de l'API Cloud API Hub (direct): {json.dumps(result)[:500]}...")
+            
+            # Vérifier si la réponse contient une URL de téléchargement
+            download_url = result.get('url')
+            if not download_url:
+                logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API Cloud API Hub (direct)")
+                return None
+            
+            logger.info(f"URL de téléchargement direct trouvée: {download_url[:100]}...")
+            
+            # Ajouter des en-têtes pour contourner les restrictions
+            download_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Referer': 'https://www.youtube.com/',
+                'Origin': 'https://www.youtube.com'
+            }
+            
+            # Télécharger la vidéo
+            response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+            
+            if response.status_code != 200:
+                logger.error(f"Erreur lors du téléchargement direct de la vidéo: {response.status_code}")
+                return None
+            
+            # Écrire le fichier sur le disque
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Vérifier si le fichier a été téléchargé correctement
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                return None
+            
+            file_size = os.path.getsize(output_path)
+            logger.info(f"Vidéo téléchargée avec succès (direct): {output_path} ({file_size} octets)")
+            
+            # Vérifier si le fichier est un MP4 valide
+            if not is_valid_mp4(output_path):
+                logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                return None
+            
+            return output_path
+        except json.JSONDecodeError:
+            logger.error(f"Impossible de décoder la réponse JSON (direct): {data.decode('utf-8')[:500]}")
+            return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement direct MP4: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def download_with_specific_format(video_id, output_path, itag):
+    """
+    Télécharge une vidéo YouTube avec un format spécifique
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        itag: ID du format à télécharger
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Tentative de téléchargement avec format spécifique (itag={itag}) pour: {video_id}")
+        
+        # Utiliser l'API Cloud API Hub pour obtenir le lien
+        conn = http.client.HTTPSConnection(CLOUD_API_HUB_HOST)
+        
+        headers = {
+            'x-rapidapi-key': RAPIDAPI_KEY,
+            'x-rapidapi-host': CLOUD_API_HUB_HOST
+        }
+        
+        # Utiliser le paramètre itag pour spécifier le format
+        conn.request("GET", f"/download?id={video_id}&itag={itag}", headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Erreur lors de l'appel à l'API Cloud API Hub (itag={itag}): {res.status} - {data.decode('utf-8')}")
+            return None
+        
+        try:
+            result = json.loads(data.decode("utf-8"))
+            logger.info(f"Réponse de l'API Cloud API Hub (itag={itag}): {json.dumps(result)[:500]}...")
+            
+            # Vérifier si la réponse contient une URL de téléchargement
+            download_url = result.get('url')
+            if not download_url:
+                logger.error(f"Aucune URL de téléchargement trouvée dans la réponse de l'API Cloud API Hub (itag={itag})")
+                return None
+            
+            logger.info(f"URL de téléchargement trouvée (itag={itag}): {download_url[:100]}...")
+            
+            # Ajouter des en-têtes pour contourner les restrictions
+            download_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Referer': 'https://www.youtube.com/',
+                'Origin': 'https://www.youtube.com'
+            }
+            
+            # Télécharger la vidéo
+            response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+            
+            if response.status_code != 200:
+                logger.error(f"Erreur lors du téléchargement de la vidéo (itag={itag}): {response.status_code}")
+                return None
+            
+            # Écrire le fichier sur le disque
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Vérifier si le fichier a été téléchargé correctement
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                logger.error(f"Le fichier téléchargé n'existe pas ou est vide (itag={itag}): {output_path}")
+                return None
+            
+            file_size = os.path.getsize(output_path)
+            logger.info(f"Vidéo téléchargée avec succès (itag={itag}): {output_path} ({file_size} octets)")
+            
+            # Vérifier si le fichier est un MP4 valide
+            if not is_valid_mp4(output_path):
+                logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide (itag={itag}): {output_path}")
+                return None
+            
+            return output_path
+        except json.JSONDecodeError:
+            logger.error(f"Impossible de décoder la réponse JSON (itag={itag}): {data.decode('utf-8')[:500]}")
+            return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement avec format spécifique (itag={itag}): {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 def download_video(video_id, output_path):
     """
     Télécharge une vidéo YouTube en utilisant l'API Cloud API Hub
@@ -411,82 +584,122 @@ def download_video(video_id, output_path):
             logger.error("Clé API RapidAPI manquante")
             return f"https://www.youtube.com/watch?v={video_id}"
         
-        # Essayer de télécharger avec différentes qualités
-        for quality in ["highest", "medium", "lowest"]:
+        # Méthode 1: Essayer le téléchargement direct
+        result = download_direct_mp4(video_id, output_path)
+        if result and os.path.exists(result) and is_valid_mp4(result):
+            # Ajouter la vidéo au cache
             try:
-                logger.info(f"Tentative de téléchargement avec la qualité: {quality}")
-                
-                # Utiliser l'API Cloud API Hub pour télécharger la vidéo
-                conn = http.client.HTTPSConnection(CLOUD_API_HUB_HOST)
-                
-                headers = {
-                    'x-rapidapi-key': RAPIDAPI_KEY,
-                    'x-rapidapi-host': CLOUD_API_HUB_HOST
-                }
-                
-                conn.request("GET", f"/download?id={video_id}&filter=audioandvideo&quality={quality}", headers=headers)
-                
-                res = conn.getresponse()
-                data = res.read()
-                
-                if res.status != 200:
-                    logger.error(f"Erreur lors de l'appel à l'API Cloud API Hub: {res.status} - {data.decode('utf-8')}")
-                    continue
-                
-                try:
-                    result = json.loads(data.decode("utf-8"))
-                    logger.info(f"Réponse de l'API Cloud API Hub: {json.dumps(result)[:500]}...")
-                    
-                    # Vérifier si la réponse contient une URL de téléchargement
-                    download_url = result.get('url')
-                    if not download_url:
-                        logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API Cloud API Hub")
-                        continue
-                    
-                    logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
-                    
-                    # Télécharger la vidéo
-                    response = requests.get(download_url, stream=True, timeout=60)
-                    
-                    if response.status_code != 200:
-                        logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
-                        continue
-                    
-                    # Écrire le fichier sur le disque
-                    with open(output_path, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                    
-                    # Vérifier si le fichier a été téléchargé correctement
-                    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                        logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-                        continue
-                    
-                    file_size = os.path.getsize(output_path)
-                    logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
-                    
-                    # Vérifier si le fichier est un MP4 valide
-                    if not is_valid_mp4(output_path):
-                        logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
-                        continue
-                    
-                    # Ajouter la vidéo au cache
-                    try:
-                        import shutil
-                        shutil.copy2(output_path, cache_path)
-                        logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-                    except Exception as e:
-                        logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
-                    
-                    return output_path
-                except json.JSONDecodeError:
-                    logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
-                    continue
+                import shutil
+                shutil.copy2(result, cache_path)
+                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
             except Exception as e:
-                logger.error(f"Erreur lors du téléchargement avec la qualité {quality}: {str(e)}")
-                logger.error(traceback.format_exc())
-                continue
+                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+            
+            return result
+        
+        # Méthode 2: Essayer avec des formats spécifiques (itags)
+        # Liste des itags courants pour les formats MP4
+        # 18: MP4 360p
+        # 22: MP4 720p
+        # 137: MP4 1080p (vidéo seulement)
+        # 140: M4A (audio seulement)
+        for itag in [22, 18, 137]:
+            result = download_with_specific_format(video_id, output_path, itag)
+            if result and os.path.exists(result) and is_valid_mp4(result):
+                # Ajouter la vidéo au cache
+                try:
+                    import shutil
+                    shutil.copy2(result, cache_path)
+                    logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+                
+                return result
+        
+        # Méthode 3: Essayer avec le paramètre filter et quality
+        for filter_type in ["audioandvideo", "video"]:
+            for quality in ["high", "low"]:
+                try:
+                    logger.info(f"Tentative de téléchargement avec filter={filter_type}, quality={quality}")
+                    
+                    # Utiliser l'API Cloud API Hub pour télécharger la vidéo
+                    conn = http.client.HTTPSConnection(CLOUD_API_HUB_HOST)
+                    
+                    headers = {
+                        'x-rapidapi-key': RAPIDAPI_KEY,
+                        'x-rapidapi-host': CLOUD_API_HUB_HOST
+                    }
+                    
+                    conn.request("GET", f"/download?id={video_id}&filter={filter_type}&quality={quality}", headers=headers)
+                    
+                    res = conn.getresponse()
+                    data = res.read()
+                    
+                    if res.status != 200:
+                        logger.error(f"Erreur lors de l'appel à l'API Cloud API Hub (filter={filter_type}, quality={quality}): {res.status} - {data.decode('utf-8')}")
+                        continue
+                    
+                    try:
+                        result = json.loads(data.decode("utf-8"))
+                        logger.info(f"Réponse de l'API Cloud API Hub (filter={filter_type}, quality={quality}): {json.dumps(result)[:500]}...")
+                        
+                        # Vérifier si la réponse contient une URL de téléchargement
+                        download_url = result.get('url')
+                        if not download_url:
+                            logger.error(f"Aucune URL de téléchargement trouvée dans la réponse de l'API Cloud API Hub (filter={filter_type}, quality={quality})")
+                            continue
+                        
+                        logger.info(f"URL de téléchargement trouvée (filter={filter_type}, quality={quality}): {download_url[:100]}...")
+                        
+                        # Ajouter des en-têtes pour contourner les restrictions
+                        download_headers = {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                            'Referer': 'https://www.youtube.com/',
+                            'Origin': 'https://www.youtube.com'
+                        }
+                        
+                        # Télécharger la vidéo
+                        response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+                        
+                        if response.status_code != 200:
+                            logger.error(f"Erreur lors du téléchargement de la vidéo (filter={filter_type}, quality={quality}): {response.status_code}")
+                            continue
+                        
+                        # Écrire le fichier sur le disque
+                        with open(output_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                        
+                        # Vérifier si le fichier a été téléchargé correctement
+                        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                            logger.error(f"Le fichier téléchargé n'existe pas ou est vide (filter={filter_type}, quality={quality}): {output_path}")
+                            continue
+                        
+                        file_size = os.path.getsize(output_path)
+                        logger.info(f"Vidéo téléchargée avec succès (filter={filter_type}, quality={quality}): {output_path} ({file_size} octets)")
+                        
+                        # Vérifier si le fichier est un MP4 valide
+                        if not is_valid_mp4(output_path):
+                            logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide (filter={filter_type}, quality={quality}): {output_path}")
+                            continue
+                        
+                        # Ajouter la vidéo au cache
+                        try:
+                            import shutil
+                            shutil.copy2(output_path, cache_path)
+                            logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+                        except Exception as e:
+                            logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+                        
+                        return output_path
+                    except json.JSONDecodeError:
+                        logger.error(f"Impossible de décoder la réponse JSON (filter={filter_type}, quality={quality}): {data.decode('utf-8')[:500]}")
+                        continue
+                except Exception as e:
+                    logger.error(f"Erreur lors du téléchargement avec filter={filter_type}, quality={quality}: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    continue
         
         # Si toutes les tentatives échouent, retourner l'URL YouTube
         logger.error("Toutes les tentatives de téléchargement ont échoué")
