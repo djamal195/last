@@ -38,6 +38,9 @@ if not os.path.exists(CACHE_DIR):
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
 CLOUD_API_HUB_HOST = "cloud-api-hub-youtube-downloader.p.rapidapi.com"
 
+# Ajouter cette constante en haut du fichier, après les autres constantes d'API
+YT_VIDEO_DOWNLOAD_HOST = "yt-video-download.p.rapidapi.com"
+
 def extract_video_id(url_or_id):
     """
     Extrait l'ID de la vidéo YouTube à partir d'une URL ou d'un ID
@@ -668,6 +671,119 @@ def download_with_alternative_api(video_id, output_path):
         logger.error(traceback.format_exc())
         return None
 
+# Ajouter cette nouvelle fonction après les autres fonctions de téléchargement
+def download_with_yt_video_download_api(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube en utilisant l'API yt-video-download
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Tentative de téléchargement avec yt-video-download API pour: {video_id}")
+        
+        # Construire l'URL YouTube
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        encoded_url = quote(youtube_url)
+        
+        # Utiliser l'API yt-video-download pour obtenir les liens
+        conn = http.client.HTTPSConnection(YT_VIDEO_DOWNLOAD_HOST)
+        
+        headers = {
+            'x-rapidapi-key': RAPIDAPI_KEY,
+            'x-rapidapi-host': YT_VIDEO_DOWNLOAD_HOST
+        }
+        
+        # Construire l'URL de l'endpoint
+        endpoint = f"/downloads/mp4?url={encoded_url}"
+        logger.info(f"Appel à l'API yt-video-download: {endpoint}")
+        
+        conn.request("GET", endpoint, headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status != 200:
+            logger.error(f"Erreur lors de l'appel à l'API yt-video-download: {res.status} - {data.decode('utf-8')}")
+            return None
+        
+        try:
+            result = json.loads(data.decode("utf-8"))
+            logger.info(f"Réponse de l'API yt-video-download: {json.dumps(result)[:500]}...")
+            
+            # Trouver la meilleure qualité disponible
+            formats = result.get('formats', [])
+            if not formats:
+                logger.error("Aucun format trouvé dans la réponse de l'API yt-video-download")
+                return None
+            
+            # Trier les formats par qualité (résolution)
+            mp4_formats = [f for f in formats if f.get('extension') == 'mp4' and f.get('url')]
+            if not mp4_formats:
+                logger.error("Aucun format MP4 trouvé dans la réponse de l'API yt-video-download")
+                return None
+            
+            # Trier par résolution (hauteur) décroissante
+            mp4_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+            
+            # Prendre le format avec la meilleure résolution
+            best_format = mp4_formats[0]
+            download_url = best_format.get('url')
+            
+            if not download_url:
+                logger.error("Aucune URL de téléchargement trouvée dans le meilleur format")
+                return None
+            
+            logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
+            
+            # Ajouter des en-têtes pour contourner les restrictions
+            download_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Referer': 'https://www.youtube.com/',
+                'Origin': 'https://www.youtube.com'
+            }
+            
+            # Télécharger la vidéo
+            response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+            
+            if response.status_code != 200:
+                logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
+                return None
+            
+            # Écrire le fichier sur le disque
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Vérifier si le fichier a été téléchargé correctement
+            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                return None
+            
+            file_size = os.path.getsize(output_path)
+            logger.info(f"Vidéo téléchargée avec succès via yt-video-download: {output_path} ({file_size} octets)")
+            
+            # Vérifier si le fichier est un MP4 valide
+            if not is_valid_mp4(output_path):
+                logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                return None
+            
+            return output_path
+        except json.JSONDecodeError:
+            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
+            return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement avec yt-video-download API: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+# Modifier la fonction download_video pour inclure la nouvelle méthode
+# Remplacer la fonction download_video existante par celle-ci
 def download_video(video_id, output_path):
     """
     Télécharge une vidéo YouTube en utilisant plusieurs méthodes
@@ -707,6 +823,19 @@ def download_video(video_id, output_path):
             os.makedirs(output_dir)
         
         # Essayer différentes méthodes de téléchargement
+        
+        # Méthode 0 (NOUVELLE): Téléchargement avec yt-video-download API
+        result = download_with_yt_video_download_api(video_id, output_path)
+        if result and os.path.exists(result) and is_valid_mp4(result):
+            # Ajouter la vidéo au cache
+            try:
+                import shutil
+                shutil.copy2(result, cache_path)
+                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+            
+            return result
         
         # Méthode 1: Téléchargement avec yt-dlp
         result = download_with_ytdlp(video_id, output_path)
