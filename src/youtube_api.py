@@ -9,6 +9,9 @@ import requests
 import http.client
 import subprocess
 import shutil
+import base64
+import random
+import string
 from typing import Dict, Any, List, Optional, Callable
 from urllib.parse import urlparse, parse_qs, quote
 from src.utils.logger import get_logger
@@ -33,6 +36,24 @@ download_thread_running = False
 CACHE_DIR = "/tmp/youtube_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
+
+# Liste des services de téléchargement YouTube
+DOWNLOAD_SERVICES = [
+    "https://ssyoutube.com/api/convert",
+    "https://yt1s.com/api/ajaxSearch",
+    "https://y2mate.com/mates/analyzeV2/ajax",
+    "https://9convert.com/api/ajaxSearch",
+    "https://savefrom.net/api/convert"
+]
+
+# Liste des User-Agents pour simuler différents navigateurs
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
+]
 
 # Clé API RapidAPI
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
@@ -373,9 +394,9 @@ def is_valid_mp4(file_path):
         logger.error(f"Erreur lors de la vérification du fichier MP4: {str(e)}")
         return False
 
-def download_with_requests(video_id, output_path):
+def download_with_direct_link(video_id, output_path):
     """
-    Télécharge une vidéo YouTube en utilisant la bibliothèque requests
+    Télécharge une vidéo YouTube en utilisant un service de téléchargement direct
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -385,405 +406,380 @@ def download_with_requests(video_id, output_path):
         Chemin de la vidéo téléchargée ou None en cas d'erreur
     """
     try:
-        logger.info(f"Tentative de téléchargement direct avec requests pour: {video_id}")
-        
-        # Utiliser l'API RapidAPI pour obtenir les informations de la vidéo
-        conn = http.client.HTTPSConnection("youtube-mp36.p.rapidapi.com")
-        
-        headers = {
-            'x-rapidapi-key': RAPIDAPI_KEY,
-            'x-rapidapi-host': "youtube-mp36.p.rapidapi.com"
-        }
-        
-        # Construire l'URL de l'endpoint
-        conn.request("GET", f"/dl?id={video_id}", headers=headers)
-        
-        res = conn.getresponse()
-        data = res.read()
-        
-        if res.status != 200:
-            logger.error(f"Erreur lors de l'appel à l'API youtube-mp36: {res.status} - {data.decode('utf-8')}")
-            return None
-        
-        try:
-            result = json.loads(data.decode("utf-8"))
-            logger.info(f"Réponse de l'API youtube-mp36: {json.dumps(result)}")
-            
-            # Vérifier si la réponse contient une URL de téléchargement
-            download_url = result.get('link')
-            if not download_url:
-                logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API youtube-mp36")
-                return None
-            
-            logger.info(f"URL de téléchargement trouvée: {download_url}")
-            
-            # Télécharger la vidéo
-            response = requests.get(download_url, stream=True, timeout=60)
-            
-            if response.status_code != 200:
-                logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
-                return None
-            
-            # Écrire le fichier sur le disque
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            # Vérifier si le fichier a été téléchargé correctement
-            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-                return None
-            
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
-            
-            return output_path
-        except json.JSONDecodeError:
-            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')}")
-            return None
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec requests: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-
-def download_with_ytdlp(video_id, output_path):
-    """
-    Télécharge une vidéo YouTube en utilisant yt-dlp
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
-        
-    Returns:
-        Chemin de la vidéo téléchargée ou None en cas d'erreur
-    """
-    try:
-        logger.info(f"Tentative de téléchargement avec yt-dlp pour: {video_id}")
-        
-        # Vérifier si yt-dlp est installé
-        try:
-            # Créer un répertoire temporaire pour le téléchargement
-            temp_dir = tempfile.mkdtemp()
-            temp_output = os.path.join(temp_dir, f"{video_id}.mp4")
-            
-            # Construire la commande yt-dlp
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            command = [
-                "python3", "-m", "pip", "install", "yt-dlp", "--quiet", "--no-warn-script-location"
-            ]
-            
-            # Installer yt-dlp
-            logger.info(f"Installation de yt-dlp: {' '.join(command)}")
-            result = subprocess.run(command, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                logger.error(f"Erreur lors de l'installation de yt-dlp: {result.stderr}")
-                return None
-            
-            # Télécharger la vidéo
-            command = [
-                "python3", "-m", "yt_dlp",
-                "--format", "mp4",
-                "--output", temp_output,
-                "--no-playlist",
-                "--quiet",
-                url
-            ]
-            
-            logger.info(f"Exécution de la commande yt-dlp: {' '.join(command)}")
-            result = subprocess.run(command, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                logger.error(f"Erreur lors de l'exécution de yt-dlp: {result.stderr}")
-                return None
-            
-            # Vérifier si le fichier a été téléchargé correctement
-            if not os.path.exists(temp_output) or os.path.getsize(temp_output) == 0:
-                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {temp_output}")
-                return None
-            
-            # Copier le fichier vers le chemin de sortie
-            shutil.copy2(temp_output, output_path)
-            
-            # Nettoyer le répertoire temporaire
-            shutil.rmtree(temp_dir)
-            
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès via yt-dlp: {output_path} ({file_size} octets)")
-            
-            return output_path
-        except Exception as e:
-            logger.error(f"Erreur lors de l'exécution de yt-dlp: {str(e)}")
-            return None
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec yt-dlp: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-
-def download_with_curl(video_id, output_path):
-    """
-    Télécharge une vidéo YouTube en utilisant curl
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
-        
-    Returns:
-        Chemin de la vidéo téléchargée ou None en cas d'erreur
-    """
-    try:
-        logger.info(f"Tentative de téléchargement avec curl pour: {video_id}")
-        
-        # Utiliser l'API RapidAPI pour obtenir les informations de la vidéo
-        conn = http.client.HTTPSConnection("youtube-mp36.p.rapidapi.com")
-        
-        headers = {
-            'x-rapidapi-key': RAPIDAPI_KEY,
-            'x-rapidapi-host': "youtube-mp36.p.rapidapi.com"
-        }
-        
-        # Construire l'URL de l'endpoint
-        conn.request("GET", f"/dl?id={video_id}", headers=headers)
-        
-        res = conn.getresponse()
-        data = res.read()
-        
-        if res.status != 200:
-            logger.error(f"Erreur lors de l'appel à l'API youtube-mp36: {res.status} - {data.decode('utf-8')}")
-            return None
-        
-        try:
-            result = json.loads(data.decode("utf-8"))
-            logger.info(f"Réponse de l'API youtube-mp36: {json.dumps(result)}")
-            
-            # Vérifier si la réponse contient une URL de téléchargement
-            download_url = result.get('link')
-            if not download_url:
-                logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API youtube-mp36")
-                return None
-            
-            logger.info(f"URL de téléchargement trouvée: {download_url}")
-            
-            # Télécharger la vidéo avec curl
-            command = [
-                "curl", "-L", "-o", output_path,
-                "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "-H", "Referer: https://www.youtube.com/",
-                download_url
-            ]
-            
-            logger.info(f"Exécution de la commande curl: {' '.join(command)}")
-            result = subprocess.run(command, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                logger.error(f"Erreur lors de l'exécution de curl: {result.stderr}")
-                return None
-            
-            # Vérifier si le fichier a été téléchargé correctement
-            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-                return None
-            
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès via curl: {output_path} ({file_size} octets)")
-            
-            return output_path
-        except json.JSONDecodeError:
-            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')}")
-            return None
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec curl: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-
-def download_with_alternative_api(video_id, output_path):
-    """
-    Télécharge une vidéo YouTube en utilisant une API alternative
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
-        
-    Returns:
-        Chemin de la vidéo téléchargée ou None en cas d'erreur
-    """
-    try:
-        logger.info(f"Tentative de téléchargement avec API alternative pour: {video_id}")
-        
-        # Utiliser l'API RapidAPI pour obtenir les informations de la vidéo
-        conn = http.client.HTTPSConnection("youtube-mp3-download1.p.rapidapi.com")
-        
-        headers = {
-            'x-rapidapi-key': RAPIDAPI_KEY,
-            'x-rapidapi-host': "youtube-mp3-download1.p.rapidapi.com"
-        }
-        
-        # Construire l'URL de l'endpoint
-        conn.request("GET", f"/dl?id={video_id}", headers=headers)
-        
-        res = conn.getresponse()
-        data = res.read()
-        
-        if res.status != 200:
-            logger.error(f"Erreur lors de l'appel à l'API alternative: {res.status} - {data.decode('utf-8')}")
-            return None
-        
-        try:
-            result = json.loads(data.decode("utf-8"))
-            logger.info(f"Réponse de l'API alternative: {json.dumps(result)}")
-            
-            # Vérifier si la réponse contient une URL de téléchargement
-            download_url = result.get('link')
-            if not download_url:
-                logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API alternative")
-                return None
-            
-            logger.info(f"URL de téléchargement trouvée: {download_url}")
-            
-            # Télécharger la vidéo
-            response = requests.get(download_url, stream=True, timeout=60)
-            
-            if response.status_code != 200:
-                logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
-                return None
-            
-            # Écrire le fichier sur le disque
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            # Vérifier si le fichier a été téléchargé correctement
-            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-                return None
-            
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès via API alternative: {output_path} ({file_size} octets)")
-            
-            return output_path
-        except json.JSONDecodeError:
-            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')}")
-            return None
-    except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec API alternative: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-
-# Ajouter cette nouvelle fonction après les autres fonctions de téléchargement
-def download_with_yt_video_download_api(video_id, output_path):
-    """
-    Télécharge une vidéo YouTube en utilisant l'API yt-video-download
-    
-    Args:
-        video_id: ID de la vidéo YouTube
-        output_path: Chemin de sortie pour la vidéo téléchargée
-        
-    Returns:
-        Chemin de la vidéo téléchargée ou None en cas d'erreur
-    """
-    try:
-        logger.info(f"Tentative de téléchargement avec yt-video-download API pour: {video_id}")
+        logger.info(f"Tentative de téléchargement direct pour: {video_id}")
         
         # Construire l'URL YouTube
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        encoded_url = quote(youtube_url)
         
-        # Utiliser l'API yt-video-download pour obtenir les liens
-        conn = http.client.HTTPSConnection(YT_VIDEO_DOWNLOAD_HOST)
+        # Essayer différents services de téléchargement
+        for service_url in DOWNLOAD_SERVICES:
+            try:
+                logger.info(f"Essai du service: {service_url}")
+                
+                # Choisir un User-Agent aléatoire
+                user_agent = random.choice(USER_AGENTS)
+                
+                # Générer un identifiant de session aléatoire
+                session_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
+                
+                # Préparer les en-têtes
+                headers = {
+                    'User-Agent': user_agent,
+                    'Referer': 'https://www.youtube.com/',
+                    'Origin': 'https://www.youtube.com',
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+                
+                # Préparer les données
+                data = {
+                    'url': youtube_url,
+                    'q_auto': 1,
+                    'ajax': 1,
+                    'token': base64.b64encode(f"{video_id}:{session_id}".encode()).decode(),
+                    'ftype': 'mp4',
+                    'fquality': '720p'
+                }
+                
+                # Envoyer la requête
+                response = requests.post(service_url, headers=headers, json=data, timeout=30)
+                
+                if response.status_code != 200:
+                    logger.warning(f"Erreur lors de l'appel au service {service_url}: {response.status_code}")
+                    continue
+                
+                # Analyser la réponse
+                try:
+                    result = response.json()
+                    logger.info(f"Réponse du service {service_url}: {json.dumps(result)[:500]}...")
+                    
+                    # Extraire l'URL de téléchargement (chaque service a une structure différente)
+                    download_url = None
+                    
+                    if 'url' in result:
+                        download_url = result['url']
+                    elif 'link' in result:
+                        download_url = result['link']
+                    elif 'data' in result and 'url' in result['data']:
+                        download_url = result['data']['url']
+                    elif 'data' in result and 'link' in result['data']:
+                        download_url = result['data']['link']
+                    elif 'links' in result and result['links'] and 'url' in result['links'][0]:
+                        download_url = result['links'][0]['url']
+                    
+                    if not download_url:
+                        logger.warning(f"Aucune URL de téléchargement trouvée dans la réponse du service {service_url}")
+                        continue
+                    
+                    logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
+                    
+                    # Télécharger la vidéo
+                    download_headers = {
+                        'User-Agent': user_agent,
+                        'Referer': service_url,
+                        'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8'
+                    }
+                    
+                    response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+                    
+                    if response.status_code != 200:
+                        logger.warning(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
+                        continue
+                    
+                    # Écrire le fichier sur le disque
+                    with open(output_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    # Vérifier si le fichier a été téléchargé correctement
+                    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                        logger.warning(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                        continue
+                    
+                    file_size = os.path.getsize(output_path)
+                    logger.info(f"Vidéo téléchargée avec succès via {service_url}: {output_path} ({file_size} octets)")
+                    
+                    # Vérifier si le fichier est un MP4 valide
+                    if not is_valid_mp4(output_path):
+                        logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                        continue
+                    
+                    return output_path
+                except json.JSONDecodeError:
+                    logger.warning(f"Impossible de décoder la réponse JSON du service {service_url}: {response.text[:500]}")
+                    continue
+            except Exception as e:
+                logger.warning(f"Erreur lors de l'utilisation du service {service_url}: {str(e)}")
+                continue
         
-        headers = {
-            'x-rapidapi-key': RAPIDAPI_KEY,
-            'x-rapidapi-host': YT_VIDEO_DOWNLOAD_HOST
-        }
-        
-        # Construire l'URL de l'endpoint
-        endpoint = f"/downloads/mp4?url={encoded_url}"
-        logger.info(f"Appel à l'API yt-video-download: {endpoint}")
-        
-        conn.request("GET", endpoint, headers=headers)
-        
-        res = conn.getresponse()
-        data = res.read()
-        
-        if res.status != 200:
-            logger.error(f"Erreur lors de l'appel à l'API yt-video-download: {res.status} - {data.decode('utf-8')}")
-            return None
-        
-        try:
-            result = json.loads(data.decode("utf-8"))
-            logger.info(f"Réponse de l'API yt-video-download: {json.dumps(result)[:500]}...")
-            
-            # Trouver la meilleure qualité disponible
-            formats = result.get('formats', [])
-            if not formats:
-                logger.error("Aucun format trouvé dans la réponse de l'API yt-video-download")
-                return None
-            
-            # Trier les formats par qualité (résolution)
-            mp4_formats = [f for f in formats if f.get('extension') == 'mp4' and f.get('url')]
-            if not mp4_formats:
-                logger.error("Aucun format MP4 trouvé dans la réponse de l'API yt-video-download")
-                return None
-            
-            # Trier par résolution (hauteur) décroissante
-            mp4_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
-            
-            # Prendre le format avec la meilleure résolution
-            best_format = mp4_formats[0]
-            download_url = best_format.get('url')
-            
-            if not download_url:
-                logger.error("Aucune URL de téléchargement trouvée dans le meilleur format")
-                return None
-            
-            logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
-            
-            # Ajouter des en-têtes pour contourner les restrictions
-            download_headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Referer': 'https://www.youtube.com/',
-                'Origin': 'https://www.youtube.com'
-            }
-            
-            # Télécharger la vidéo
-            response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
-            
-            if response.status_code != 200:
-                logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
-                return None
-            
-            # Écrire le fichier sur le disque
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            # Vérifier si le fichier a été téléchargé correctement
-            if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-                return None
-            
-            file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès via yt-video-download: {output_path} ({file_size} octets)")
-            
-            # Vérifier si le fichier est un MP4 valide
-            if not is_valid_mp4(output_path):
-                logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
-                return None
-            
-            return output_path
-        except json.JSONDecodeError:
-            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
-            return None
+        logger.warning("Tous les services de téléchargement direct ont échoué")
+        return None
     except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec yt-video-download API: {str(e)}")
+        logger.error(f"Erreur lors du téléchargement direct: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
-# Modifier la fonction download_video pour inclure la nouvelle méthode
-# Remplacer la fonction download_video existante par celle-ci
+def download_with_proxy(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube en utilisant un proxy
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Tentative de téléchargement via proxy pour: {video_id}")
+        
+        # Liste des services proxy
+        proxy_services = [
+            "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+            "https://www.proxy-list.download/api/v1/get?type=http&anon=elite",
+            "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+        ]
+        
+        # Récupérer une liste de proxies
+        proxies = []
+        for service in proxy_services:
+            try:
+                response = requests.get(service, timeout=10)
+                if response.status_code == 200:
+                    # Extraire les proxies (format IP:PORT)
+                    proxy_list = re.findall(r'\d+\.\d+\.\d+\.\d+:\d+', response.text)
+                    proxies.extend(proxy_list)
+            except Exception as e:
+                logger.warning(f"Erreur lors de la récupération des proxies depuis {service}: {str(e)}")
+        
+        if not proxies:
+            logger.warning("Aucun proxy trouvé")
+            return None
+        
+        # Mélanger la liste des proxies
+        random.shuffle(proxies)
+        
+        # Construire l'URL YouTube
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        # Essayer différents proxies
+        for proxy in proxies[:5]:  # Limiter à 5 tentatives
+            try:
+                logger.info(f"Essai du proxy: {proxy}")
+                
+                # Configurer le proxy
+                proxy_dict = {
+                    'http': f'http://{proxy}',
+                    'https': f'http://{proxy}'
+                }
+                
+                # Choisir un User-Agent aléatoire
+                user_agent = random.choice(USER_AGENTS)
+                
+                # Préparer les en-têtes
+                headers = {
+                    'User-Agent': user_agent,
+                    'Referer': 'https://www.youtube.com/',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+                }
+                
+                # Créer un répertoire temporaire pour le téléchargement
+                temp_dir = tempfile.mkdtemp()
+                temp_output = os.path.join(temp_dir, f"{video_id}.mp4")
+                
+                # Télécharger la vidéo avec yt-dlp via le proxy
+                command = [
+                    "python3", "-m", "pip", "install", "yt-dlp", "--quiet", "--no-warn-script-location"
+                ]
+                
+                # Installer yt-dlp
+                logger.info(f"Installation de yt-dlp: {' '.join(command)}")
+                result = subprocess.run(command, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    logger.warning(f"Erreur lors de l'installation de yt-dlp: {result.stderr}")
+                    continue
+                
+                # Télécharger la vidéo
+                command = [
+                    "python3", "-m", "yt_dlp",
+                    "--format", "mp4",
+                    "--output", temp_output,
+                    "--no-playlist",
+                    "--quiet",
+                    "--proxy", f"http://{proxy}",
+                    "--user-agent", user_agent,
+                    "--no-check-certificate",
+                    "--no-cache-dir",
+                    youtube_url
+                ]
+                
+                logger.info(f"Exécution de la commande yt-dlp avec proxy: {' '.join(command)}")
+                result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                
+                if result.returncode != 0:
+                    logger.warning(f"Erreur lors de l'exécution de yt-dlp avec proxy: {result.stderr}")
+                    continue
+                
+                # Vérifier si le fichier a été téléchargé correctement
+                if not os.path.exists(temp_output) or os.path.getsize(temp_output) == 0:
+                    logger.warning(f"Le fichier téléchargé n'existe pas ou est vide: {temp_output}")
+                    continue
+                
+                # Copier le fichier vers le chemin de sortie
+                shutil.copy2(temp_output, output_path)
+                
+                # Nettoyer le répertoire temporaire
+                shutil.rmtree(temp_dir)
+                
+                file_size = os.path.getsize(output_path)
+                logger.info(f"Vidéo téléchargée avec succès via proxy {proxy}: {output_path} ({file_size} octets)")
+                
+                # Vérifier si le fichier est un MP4 valide
+                if not is_valid_mp4(output_path):
+                    logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                    continue
+                
+                return output_path
+            except Exception as e:
+                logger.warning(f"Erreur lors de l'utilisation du proxy {proxy}: {str(e)}")
+                continue
+        
+        logger.warning("Tous les proxies ont échoué")
+        return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement via proxy: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def download_with_invidious(video_id, output_path):
+    """
+    Télécharge une vidéo YouTube en utilisant les instances Invidious
+    
+    Args:
+        video_id: ID de la vidéo YouTube
+        output_path: Chemin de sortie pour la vidéo téléchargée
+        
+    Returns:
+        Chemin de la vidéo téléchargée ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Tentative de téléchargement via Invidious pour: {video_id}")
+        
+        # Liste des instances Invidious connues
+        invidious_instances = [
+            "https://invidious.snopyta.org",
+            "https://yewtu.be",
+            "https://invidious.kavin.rocks",
+            "https://vid.puffyan.us",
+            "https://invidious.namazso.eu"
+        ]
+        
+        # Mélanger la liste des instances
+        random.shuffle(invidious_instances)
+        
+        # Essayer différentes instances
+        for instance in invidious_instances:
+            try:
+                logger.info(f"Essai de l'instance Invidious: {instance}")
+                
+                # Récupérer les informations de la vidéo
+                api_url = f"{instance}/api/v1/videos/{video_id}"
+                
+                # Choisir un User-Agent aléatoire
+                user_agent = random.choice(USER_AGENTS)
+                
+                # Préparer les en-têtes
+                headers = {
+                    'User-Agent': user_agent,
+                    'Accept': 'application/json'
+                }
+                
+                response = requests.get(api_url, headers=headers, timeout=30)
+                
+                if response.status_code != 200:
+                    logger.warning(f"Erreur lors de l'appel à l'API Invidious {instance}: {response.status_code}")
+                    continue
+                
+                # Analyser la réponse
+                try:
+                    result = response.json()
+                    logger.info(f"Réponse de l'instance Invidious {instance}: {json.dumps(result)[:500]}...")
+                    
+                    # Extraire les formats disponibles
+                    formats = result.get('adaptiveFormats', [])
+                    if not formats:
+                        logger.warning(f"Aucun format trouvé dans la réponse de l'instance Invidious {instance}")
+                        continue
+                    
+                    # Filtrer les formats MP4 vidéo
+                    mp4_formats = [f for f in formats if f.get('type', '').startswith('video/mp4') and f.get('url')]
+                    if not mp4_formats:
+                        logger.warning(f"Aucun format MP4 trouvé dans la réponse de l'instance Invidious {instance}")
+                        continue
+                    
+                    # Trier par résolution (hauteur) décroissante
+                    mp4_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+                    
+                    # Prendre le format avec la meilleure résolution
+                    best_format = mp4_formats[0]
+                    download_url = best_format.get('url')
+                    
+                    if not download_url:
+                        logger.warning(f"Aucune URL de téléchargement trouvée dans le meilleur format")
+                        continue
+                    
+                    logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
+                    
+                    # Télécharger la vidéo
+                    download_headers = {
+                        'User-Agent': user_agent,
+                        'Referer': instance,
+                        'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8'
+                    }
+                    
+                    response = requests.get(download_url, headers=download_headers, stream=True, timeout=60)
+                    
+                    if response.status_code != 200:
+                        logger.warning(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
+                        continue
+                    
+                    # Écrire le fichier sur le disque
+                    with open(output_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    
+                    # Vérifier si le fichier a été téléchargé correctement
+                    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                        logger.warning(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                        continue
+                    
+                    file_size = os.path.getsize(output_path)
+                    logger.info(f"Vidéo téléchargée avec succès via Invidious {instance}: {output_path} ({file_size} octets)")
+                    
+                    # Vérifier si le fichier est un MP4 valide
+                    if not is_valid_mp4(output_path):
+                        logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                        continue
+                    
+                    return output_path
+                except json.JSONDecodeError:
+                    logger.warning(f"Impossible de décoder la réponse JSON de l'instance Invidious {instance}: {response.text[:500]}")
+                    continue
+            except Exception as e:
+                logger.warning(f"Erreur lors de l'utilisation de l'instance Invidious {instance}: {str(e)}")
+                continue
+        
+        logger.warning("Toutes les instances Invidious ont échoué")
+        return None
+    except Exception as e:
+        logger.error(f"Erreur lors du téléchargement via Invidious: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 def download_video(video_id, output_path):
     """
     Télécharge une vidéo YouTube en utilisant plusieurs méthodes
@@ -824,8 +820,8 @@ def download_video(video_id, output_path):
         
         # Essayer différentes méthodes de téléchargement
         
-        # Méthode 0 (NOUVELLE): Téléchargement avec yt-video-download API
-        result = download_with_yt_video_download_api(video_id, output_path)
+        # Méthode 1: Téléchargement direct
+        result = download_with_direct_link(video_id, output_path)
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
@@ -837,8 +833,8 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Méthode 1: Téléchargement avec yt-dlp
-        result = download_with_ytdlp(video_id, output_path)
+        # Méthode 2: Téléchargement via Invidious
+        result = download_with_invidious(video_id, output_path)
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
@@ -850,34 +846,8 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Méthode 2: Téléchargement avec requests
-        result = download_with_requests(video_id, output_path)
-        if result and os.path.exists(result) and is_valid_mp4(result):
-            # Ajouter la vidéo au cache
-            try:
-                import shutil
-                shutil.copy2(result, cache_path)
-                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
-            
-            return result
-        
-        # Méthode 3: Téléchargement avec curl
-        result = download_with_curl(video_id, output_path)
-        if result and os.path.exists(result) and is_valid_mp4(result):
-            # Ajouter la vidéo au cache
-            try:
-                import shutil
-                shutil.copy2(result, cache_path)
-                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
-            
-            return result
-        
-        # Méthode 4: Téléchargement avec API alternative
-        result = download_with_alternative_api(video_id, output_path)
+        # Méthode 3: Téléchargement via proxy
+        result = download_with_proxy(video_id, output_path)
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
