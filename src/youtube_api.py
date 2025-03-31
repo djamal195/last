@@ -414,14 +414,47 @@ def download_with_youtube_downloader_api(video_id, output_path):
             
             result = json.loads(result_text)
             
-            # Journaliser les clés principales de la réponse pour le débogage
-            logger.info(f"Clés principales dans la réponse: {list(result.keys())}")
-            
             # Extraire l'URL de téléchargement
             download_url = None
             
-            # Vérifier différentes structures possibles de la réponse
-            if 'formats' in result and result['formats']:
+            # Journaliser les clés principales de la réponse pour le débogage
+            logger.info(f"Clés principales dans la réponse: {list(result.keys())}")
+            
+            # Vérifier si nous avons des formats vidéo directement dans la réponse
+            if 'video_formats' in result and result['video_formats']:
+                video_formats = result['video_formats']
+                logger.info(f"Nombre de formats vidéo trouvés: {len(video_formats)}")
+                
+                # Journaliser les premiers formats vidéo pour le débogage
+                for i, fmt in enumerate(video_formats[:3]):
+                    logger.info(f"Format vidéo {i}: {json.dumps(fmt)}")
+                
+                # Filtrer les formats vidéo qui ont une URL
+                valid_formats = [f for f in video_formats if 'url' in f]
+                
+                if valid_formats:
+                    # Trier par qualité (résolution) décroissante si possible
+                    if 'height' in valid_formats[0]:
+                        valid_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+                    elif 'quality' in valid_formats[0]:
+                        # Extraire la résolution de la qualité si possible
+                        def get_resolution(fmt):
+                            quality = fmt.get('quality', '')
+                            match = re.search(r'(\d+)p', quality)
+                            return int(match.group(1)) if match else 0
+                        
+                        valid_formats.sort(key=get_resolution, reverse=True)
+                    
+                    # Prendre le format vidéo avec la meilleure qualité
+                    best_video = valid_formats[0]
+                    logger.info(f"Meilleur format vidéo: {json.dumps(best_video)}")
+                    
+                    # Extraire l'URL de téléchargement
+                    download_url = best_video.get('url')
+            
+            # Si nous n'avons pas trouvé d'URL dans video_formats, vérifier les autres structures possibles
+            if not download_url and 'formats' in result and result['formats']:
+                # Code existant pour traiter les formats
                 logger.info(f"Nombre de formats trouvés: {len(result['formats'])}")
                 
                 # Journaliser les premiers formats pour le débogage
