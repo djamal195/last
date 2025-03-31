@@ -409,28 +409,109 @@ def download_with_youtube_downloader_api(video_id, output_path):
             return None
         
         try:
-            result = json.loads(data.decode("utf-8"))
-            logger.info(f"Réponse de l'API youtube-downloader-api: {json.dumps(result)[:500]}...")
+            result_text = data.decode("utf-8")
+            logger.info(f"Réponse brute de l'API youtube-downloader-api: {result_text[:1000]}...")
+            
+            result = json.loads(result_text)
+            
+            # Journaliser les clés principales de la réponse pour le débogage
+            logger.info(f"Clés principales dans la réponse: {list(result.keys())}")
             
             # Extraire l'URL de téléchargement
             download_url = None
             
-            # Vérifier si la réponse contient une URL de téléchargement
+            # Vérifier différentes structures possibles de la réponse
             if 'formats' in result and result['formats']:
+                logger.info(f"Nombre de formats trouvés: {len(result['formats'])}")
+                
+                # Journaliser les premiers formats pour le débogage
+                for i, fmt in enumerate(result['formats'][:3]):
+                    logger.info(f"Format {i}: {json.dumps(fmt)}")
+                
                 # Filtrer les formats vidéo (avec audio)
-                video_formats = [f for f in result['formats'] if f.get('hasAudio', False) and f.get('hasVideo', False)]
+                video_formats = []
+                
+                for fmt in result['formats']:
+                    # Vérifier différentes structures possibles pour les formats
+                    has_audio = fmt.get('hasAudio', False)
+                    has_video = fmt.get('hasVideo', False)
+                    
+                    # Certaines API utilisent d'autres champs
+                    if 'audioQuality' in fmt:
+                        has_audio = fmt.get('audioQuality') not in [None, 'AUDIO_QUALITY_LOW']
+                    
+                    if 'qualityLabel' in fmt:
+                        has_video = fmt.get('qualityLabel') is not None
+                    
+                    # Vérifier si c'est un format vidéo avec audio
+                    if has_audio and has_video:
+                        video_formats.append(fmt)
+                
+                logger.info(f"Nombre de formats vidéo avec audio trouvés: {len(video_formats)}")
                 
                 if video_formats:
                     # Trier par qualité (résolution) décroissante
-                    video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+                    if 'height' in video_formats[0]:
+                        video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+                    elif 'qualityLabel' in video_formats[0]:
+                        # Extraire la résolution du qualityLabel (ex: "720p" -> 720)
+                        def get_resolution(fmt):
+                            label = fmt.get('qualityLabel', '')
+                            match = re.search(r'(\d+)p', label)
+                            return int(match.group(1)) if match else 0
+                        
+                        video_formats.sort(key=get_resolution, reverse=True)
                     
                     # Prendre la vidéo avec la meilleure qualité
                     best_video = video_formats[0]
+                    logger.info(f"Meilleur format vidéo: {json.dumps(best_video)}")
+                    
+                    # Extraire l'URL de téléchargement
                     download_url = best_video.get('url')
+                    
+                    # Certaines API utilisent d'autres champs
+                    if not download_url and 'signatureCipher' in best_video:
+                        cipher = best_video.get('signatureCipher', '')
+                        url_match = re.search(r'url=([^&]+)', cipher)
+                        if url_match:
+                            download_url = url_match.group(1)
+                            download_url = requests.utils.unquote(download_url)
+            
+            # Vérifier d'autres structures possibles
+            if not download_url and 'streamingData' in result:
+                streaming_data = result['streamingData']
+                
+                if 'formats' in streaming_data:
+                    formats = streaming_data['formats']
+                    if formats:
+                        best_format = formats[0]  # Prendre le premier format
+                        download_url = best_format.get('url')
+                
+                if not download_url and 'adaptiveFormats' in streaming_data:
+                    adaptive_formats = streaming_data['adaptiveFormats']
+                    video_formats = [f for f in adaptive_formats if f.get('mimeType', '').startswith('video/')]
+                    if video_formats:
+                        best_format = video_formats[0]  # Prendre le premier format vidéo
+                        download_url = best_format.get('url')
+            
+            # Vérifier encore d'autres structures possibles
+            if not download_url and 'url' in result:
+                download_url = result['url']
+            
+            if not download_url and 'links' in result:
+                links = result['links']
+                if isinstance(links, list) and links:
+                    download_url = links[0].get('url')
+                elif isinstance(links, dict):
+                    for quality, link in links.items():
+                        if isinstance(link, dict) and 'url' in link:
+                            download_url = link['url']
+                            break
             
             if not download_url:
                 logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API youtube-downloader-api")
-                return None
+                # Retourner l'URL YouTube comme solution de secours
+                return f"https://www.youtube.com/watch?v={video_id}"
             
             logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
             
@@ -439,7 +520,7 @@ def download_with_youtube_downloader_api(video_id, output_path):
             
             if response.status_code != 200:
                 logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
-                return None
+                return f"https://www.youtube.com/watch?v={video_id}"
             
             # Écrire le fichier sur le disque
             with open(output_path, 'wb') as f:
@@ -450,7 +531,7 @@ def download_with_youtube_downloader_api(video_id, output_path):
             # Vérifier si le fichier a été téléchargé correctement
             if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
                 logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
-                return None
+                return f"https://www.youtube.com/watch?v={video_id}"
             
             file_size = os.path.getsize(output_path)
             logger.info(f"Vidéo téléchargée avec succès via youtube-downloader-api: {output_path} ({file_size} octets)")
@@ -458,16 +539,16 @@ def download_with_youtube_downloader_api(video_id, output_path):
             # Vérifier si le fichier est un MP4 valide
             if not is_valid_mp4(output_path):
                 logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
-                return None
+                return f"https://www.youtube.com/watch?v={video_id}"
             
             return output_path
         except json.JSONDecodeError:
             logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
-            return None
+            return f"https://www.youtube.com/watch?v={video_id}"
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement avec youtube-downloader-api: {str(e)}")
         logger.error(traceback.format_exc())
-        return None
+        return f"https://www.youtube.com/watch?v={video_id}"
 
 def download_video(video_id, output_path):
     """
@@ -509,6 +590,12 @@ def download_video(video_id, output_path):
         
         # Télécharger la vidéo avec l'API youtube-downloader-api
         result = download_with_youtube_downloader_api(video_id, output_path)
+        
+        # Si le résultat est une URL YouTube, la retourner directement
+        if isinstance(result, str) and result.startswith("https://www.youtube.com/watch"):
+            logger.info(f"Retour de l'URL YouTube: {result}")
+            return result
+        
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
