@@ -35,7 +35,7 @@ if not os.path.exists(CACHE_DIR):
 
 # Configuration de l'API RapidAPI
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
-RAPIDAPI_HOST = "fast-tubedown-videos-api.p.rapidapi.com"
+RAPIDAPI_HOST = "youtube-downloader-api-fast-reliable-and-easy.p.rapidapi.com"
 
 def extract_video_id(url_or_id):
     """
@@ -369,9 +369,9 @@ def is_valid_mp4(file_path):
         logger.error(f"Erreur lors de la vérification du fichier MP4: {str(e)}")
         return False
 
-def download_with_fast_tubedown_api(video_id, output_path):
+def download_with_youtube_downloader_api(video_id, output_path):
     """
-    Télécharge une vidéo YouTube en utilisant l'API fast-tubedown-videos-api
+    Télécharge une vidéo YouTube en utilisant l'API youtube-downloader-api-fast-reliable-and-easy
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -381,13 +381,13 @@ def download_with_fast_tubedown_api(video_id, output_path):
         Chemin de la vidéo téléchargée ou None en cas d'erreur
     """
     try:
-        logger.info(f"Tentative de téléchargement avec fast-tubedown-videos-api pour: {video_id}")
+        logger.info(f"Tentative de téléchargement avec youtube-downloader-api pour: {video_id}")
         
         # Construire l'URL YouTube
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
         encoded_url = quote(youtube_url)
         
-        # Utiliser l'API fast-tubedown-videos-api pour obtenir les liens
+        # Utiliser l'API youtube-downloader-api pour obtenir les liens
         conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
         
         headers = {
@@ -396,8 +396,8 @@ def download_with_fast_tubedown_api(video_id, output_path):
         }
         
         # Construire l'URL de l'endpoint
-        endpoint = f"/?tik={encoded_url}"
-        logger.info(f"Appel à l'API fast-tubedown-videos-api: {endpoint}")
+        endpoint = f"/fetch_media?url={encoded_url}"
+        logger.info(f"Appel à l'API youtube-downloader-api: {endpoint}")
         
         conn.request("GET", endpoint, headers=headers)
         
@@ -405,28 +405,31 @@ def download_with_fast_tubedown_api(video_id, output_path):
         data = res.read()
         
         if res.status != 200:
-            logger.error(f"Erreur lors de l'appel à l'API fast-tubedown-videos-api: {res.status} - {data.decode('utf-8')}")
+            logger.error(f"Erreur lors de l'appel à l'API youtube-downloader-api: {res.status} - {data.decode('utf-8')}")
             return None
         
         try:
             result = json.loads(data.decode("utf-8"))
-            logger.info(f"Réponse de l'API fast-tubedown-videos-api: {json.dumps(result)[:500]}...")
+            logger.info(f"Réponse de l'API youtube-downloader-api: {json.dumps(result)[:500]}...")
             
             # Extraire l'URL de téléchargement
             download_url = None
             
             # Vérifier si la réponse contient une URL de téléchargement
-            if 'data' in result and 'videos' in result['data'] and result['data']['videos']:
-                videos = result['data']['videos']
-                # Trier par qualité (résolution) décroissante
-                videos.sort(key=lambda x: x.get('quality', 0), reverse=True)
+            if 'formats' in result and result['formats']:
+                # Filtrer les formats vidéo (avec audio)
+                video_formats = [f for f in result['formats'] if f.get('hasAudio', False) and f.get('hasVideo', False)]
                 
-                # Prendre la vidéo avec la meilleure qualité
-                best_video = videos[0]
-                download_url = best_video.get('url')
+                if video_formats:
+                    # Trier par qualité (résolution) décroissante
+                    video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
+                    
+                    # Prendre la vidéo avec la meilleure qualité
+                    best_video = video_formats[0]
+                    download_url = best_video.get('url')
             
             if not download_url:
-                logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API fast-tubedown-videos-api")
+                logger.error("Aucune URL de téléchargement trouvée dans la réponse de l'API youtube-downloader-api")
                 return None
             
             logger.info(f"URL de téléchargement trouvée: {download_url[:100]}...")
@@ -450,7 +453,7 @@ def download_with_fast_tubedown_api(video_id, output_path):
                 return None
             
             file_size = os.path.getsize(output_path)
-            logger.info(f"Vidéo téléchargée avec succès via fast-tubedown-videos-api: {output_path} ({file_size} octets)")
+            logger.info(f"Vidéo téléchargée avec succès via youtube-downloader-api: {output_path} ({file_size} octets)")
             
             # Vérifier si le fichier est un MP4 valide
             if not is_valid_mp4(output_path):
@@ -462,7 +465,7 @@ def download_with_fast_tubedown_api(video_id, output_path):
             logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8')[:500]}")
             return None
     except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec fast-tubedown-videos-api: {str(e)}")
+        logger.error(f"Erreur lors du téléchargement avec youtube-downloader-api: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -504,8 +507,8 @@ def download_video(video_id, output_path):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # Télécharger la vidéo avec l'API fast-tubedown-videos-api
-        result = download_with_fast_tubedown_api(video_id, output_path)
+        # Télécharger la vidéo avec l'API youtube-downloader-api
+        result = download_with_youtube_downloader_api(video_id, output_path)
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
@@ -518,7 +521,7 @@ def download_video(video_id, output_path):
             return result
         
         # Si le téléchargement échoue, retourner l'URL YouTube
-        logger.error("Le téléchargement avec fast-tubedown-videos-api a échoué")
+        logger.error("Le téléchargement avec youtube-downloader-api a échoué")
         return f"https://www.youtube.com/watch?v={video_id}"
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
