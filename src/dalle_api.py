@@ -5,14 +5,27 @@ import traceback
 import base64
 import tempfile
 import requests
-from typing import Optional, Dict, Any
+import time
+import threading
+from typing import Optional, Dict, Any, Callable
 from src.utils.logger import get_logger
+from src.cloudinary_service import upload_file
 
 logger = get_logger(__name__)
 
 # Configuration de l'API RapidAPI
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
 RAPIDAPI_HOST = "chatgpt-42.p.rapidapi.com"
+
+# File d'attente pour les générations d'images
+image_queue = []
+image_queue_lock = threading.Lock()
+image_thread = None
+image_thread_running = False
+
+# Nombre maximum de générations simultanées
+MAX_CONCURRENT_GENERATIONS = 3
+generation_semaphore = threading.Semaphore(MAX_CONCURRENT_GENERATIONS)
 
 def generate_image(prompt: str, width: int = 512, height: int = 512) -> Optional[Dict[str, Any]]:
     """
@@ -74,22 +87,30 @@ def generate_image(prompt: str, width: int = 512, height: int = 512) -> Optional
 
 def save_generated_image(image_data: Dict[str, Any]) -> Optional[str]:
     """
-    Sauvegarde l'image générée dans un fichier temporaire
+    Sauvegarde l'image générée dans un fichier temporaire ou retourne l'URL
     
     Args:
         image_data: Données de l'image générée
         
     Returns:
-        Chemin du fichier image ou None en cas d'erreur
+        Chemin du fichier image, URL de l'image, ou None en cas d'erreur
     """
     try:
         # Journaliser les clés disponibles dans les données
         logger.info(f"Clés disponibles dans les données d'image: {list(image_data.keys())}")
         
+        # Vérifier si les données contiennent une URL dans "generated_image"
+        if "generated_image" in image_data:
+            image_url = image_data["generated_image"]
+            logger.info(f"URL de l'image générée (clé 'generated_image'): {image_url}")
+            
+            # Télécharger l'image depuis l'URL
+            return download_image_from_url(image_url)
+        
         # Vérifier si les données contiennent une URL ou des données base64
         if "url" in image_data:
             logger.info(f"URL de l'image générée: {image_data['url']}")
-            return image_data["url"]
+            return download_image_from_url(image_data["url"])
         elif "b64_json" in image_data:
             # Créer un fichier temporaire pour l'image
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -133,7 +154,7 @@ def save_generated_image(image_data: Dict[str, Any]) -> Optional[str]:
             # Vérifier si c'est une URL
             if isinstance(image_content, str) and (image_content.startswith("http://") or image_content.startswith("https://")):
                 logger.info(f"URL de l'image générée (clé 'image'): {image_content}")
-                return image_content
+                return download_image_from_url(image_content)
             
             # Sinon, essayer de traiter comme base64
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -165,7 +186,7 @@ def save_generated_image(image_data: Dict[str, Any]) -> Optional[str]:
         elif "imageUrl" in image_data:
             # Certaines API renvoient l'URL dans une clé "imageUrl"
             logger.info(f"URL de l'image générée (clé 'imageUrl'): {image_data['imageUrl']}")
-            return image_data["imageUrl"]
+            return download_image_from_url(image_data["imageUrl"])
         elif "result" in image_data:
             # Certaines API encapsulent le résultat dans une clé "result"
             result = image_data["result"]
@@ -176,7 +197,7 @@ def save_generated_image(image_data: Dict[str, Any]) -> Optional[str]:
                 # Si result est une chaîne, c'est probablement une URL
                 if result.startswith("http://") or result.startswith("https://"):
                     logger.info(f"URL de l'image générée (clé 'result'): {result}")
-                    return result
+                    return download_image_from_url(result)
                 
                 # Sinon, essayer de traiter comme base64
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
@@ -208,9 +229,9 @@ def save_generated_image(image_data: Dict[str, Any]) -> Optional[str]:
             # Essayer de trouver une URL dans les données
             for key, value in image_data.items():
                 if isinstance(value, str) and (value.startswith("http://") or value.startswith("https://")):
-                    if ".jpg" in value or ".png" in value or ".jpeg" in value or ".webp" in value:
+                    if ".jpg" in value or ".png" in value or ".jpeg" in value or ".webp" in value or "matagimage" in value:
                         logger.info(f"URL d'image trouvée dans la clé '{key}': {value}")
-                        return value
+                        return download_image_from_url(value)
             
             # Si nous avons une réponse mais pas d'URL directe, essayer de télécharger l'image
             # Certaines API nécessitent un second appel pour obtenir l'image
@@ -253,15 +274,24 @@ def download_image_from_url(url: str) -> Optional[str]:
         temp_file_path = temp_file.name
         
         # Télécharger l'image
-        response = requests.get(url, stream=True, timeout=30)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        }
+        
+        response = requests.get(url, stream=True, timeout=30, headers=headers)
         
         if response.status_code == 200:
             with open(temp_file_path, 'wb') as f:
                 for chunk in response.iter_content(1024):
                     f.write(chunk)
             
-            logger.info(f"Image téléchargée et sauvegardée dans: {temp_file_path}")
-            return temp_file_path
+            # Vérifier que le fichier a été téléchargé correctement
+            if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 100:
+                logger.info(f"Image téléchargée et sauvegardée dans: {temp_file_path} ({os.path.getsize(temp_file_path)} octets)")
+                return temp_file_path
+            else:
+                logger.error(f"Fichier téléchargé invalide ou trop petit: {temp_file_path} ({os.path.getsize(temp_file_path) if os.path.exists(temp_file_path) else 'N/A'} octets)")
+                return None
         else:
             logger.error(f"Erreur lors du téléchargement de l'image: {response.status_code}")
             return None
@@ -269,4 +299,174 @@ def download_image_from_url(url: str) -> Optional[str]:
         logger.error(f"Erreur lors du téléchargement de l'image: {str(e)}")
         logger.error(traceback.format_exc())
         return None
+
+def generate_and_upload_image(prompt: str, callback: Callable[[str], None]):
+    """
+    Ajoute une génération d'image à la file d'attente
+    
+    Args:
+        prompt: Texte décrivant l'image à générer
+        callback: Fonction à appeler une fois l'image générée et téléchargée
+    """
+    try:
+        logger.info(f"Ajout de la génération d'image à la file d'attente: {prompt}")
+        
+        # Ajouter la génération à la file d'attente
+        with image_queue_lock:
+            image_queue.append({
+                'prompt': prompt,
+                'callback': callback,
+                'added_time': time.time()
+            })
+        
+        # Démarrer le thread de traitement s'il n'est pas déjà en cours d'exécution
+        start_image_thread()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Erreur lors de l'ajout de la génération d'image à la file d'attente: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        if callback:
+            callback(None)
+        
+        return False
+
+def start_image_thread():
+    """
+    Démarre le thread de traitement des générations d'images
+    """
+    global image_thread, image_thread_running
+    
+    if image_thread_running:
+        return
+    
+    image_thread_running = True
+    image_thread = threading.Thread(target=process_image_queue)
+    image_thread.daemon = True
+    image_thread.start()
+    
+    logger.info("Thread de génération d'images démarré")
+
+def process_image_queue():
+    """
+    Traite la file d'attente des générations d'images
+    """
+    global image_thread_running
+    
+    try:
+        logger.info("Démarrage du traitement de la file d'attente des générations d'images")
+        
+        while True:
+            # Vérifier s'il y a des générations dans la file d'attente
+            with image_queue_lock:
+                if not image_queue:
+                    logger.info("File d'attente vide, arrêt du thread")
+                    image_thread_running = False
+                    break
+                
+                # Récupérer la prochaine génération
+                generation = image_queue.pop(0)
+            
+            # Traiter la génération
+            prompt = generation['prompt']
+            callback = generation['callback']
+            
+            logger.info(f"Traitement de la génération d'image: {prompt}")
+            
+            # Acquérir le sémaphore pour limiter les générations simultanées
+            generation_semaphore.acquire()
+            
+            try:
+                # Générer l'image
+                image_data = generate_image(prompt)
+                
+                if image_data:
+                    # Sauvegarder l'image
+                    image_path = save_generated_image(image_data)
+                    
+                    if image_path:
+                        # Si c'est un chemin de fichier, télécharger sur Cloudinary
+                        if os.path.exists(image_path):
+                            try:
+                                # Télécharger l'image sur Cloudinary
+                                image_id = f"dalle_{int(time.time())}"
+                                cloudinary_result = upload_file(image_path, image_id, "image")
+                                
+                                if cloudinary_result and cloudinary_result.get('secure_url'):
+                                    image_url = cloudinary_result.get('secure_url')
+                                    logger.info(f"Image téléchargée sur Cloudinary: {image_url}")
+                                    
+                                    # Appeler le callback avec l'URL Cloudinary
+                                    if callback:
+                                        callback(image_url)
+                                else:
+                                    logger.error("Échec du téléchargement sur Cloudinary")
+                                    if callback:
+                                        callback(image_path)
+                            except Exception as e:
+                                logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
+                                logger.error(traceback.format_exc())
+                                if callback:
+                                    callback(image_path)
+                        else:
+                            # Si c'est une URL, appeler directement le callback
+                            if callback:
+                                callback(image_path)
+                    else:
+                        logger.error("Échec de la sauvegarde de l'image")
+                        if callback:
+                            callback(None)
+                else:
+                    logger.error("Échec de la génération d'image")
+                    if callback:
+                        callback(None)
+            except Exception as e:
+                logger.error(f"Erreur lors de la génération d'image: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                if callback:
+                    callback(None)
+            finally:
+                # Libérer le sémaphore
+                generation_semaphore.release()
+            
+            # Attendre un peu pour éviter de surcharger le système
+            time.sleep(0.5)
+    except Exception as e:
+        logger.error(f"Erreur dans le thread de génération d'images: {str(e)}")
+        logger.error(traceback.format_exc())
+    finally:
+        image_thread_running = False
+        logger.info("Thread de génération d'images arrêté")
+
+def stop_image_thread():
+    """
+    Arrête le thread de génération d'images proprement
+    """
+    global image_thread_running
+    
+    logger.info("Arrêt du thread de génération d'images demandé")
+    
+    # Arrêter le thread de traitement
+    image_thread_running = False
+    
+    # Attendre que le thread se termine
+    if image_thread and image_thread.is_alive():
+        try:
+            image_thread.join(timeout=5)
+            logger.info("Thread de génération d'images arrêté")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'arrêt du thread de génération d'images: {str(e)}")
+    
+    # Sauvegarder la file d'attente pour une utilisation future
+    try:
+        with image_queue_lock:
+            queue_size = len(image_queue)
+            # Ici, on pourrait sauvegarder la file d'attente dans un fichier ou une base de données
+            logger.info(f"File d'attente sauvegardée: {queue_size} éléments")
+    except Exception as e:
+        logger.error(f"Erreur lors de la sauvegarde de la file d'attente: {str(e)}")
+    
+    logger.info("Thread de génération d'images arrêté")
 
