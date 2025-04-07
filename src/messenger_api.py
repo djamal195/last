@@ -91,22 +91,35 @@ def handle_message(sender_id, message_data):
         elif 'postback' in message_data:
             logger.info(f"Traitement du postback: {json.dumps(message_data['postback'])}")
             try:
-                payload = json.loads(message_data['postback']['payload'])
-                logger.info(f"Payload du postback: {json.dumps(payload)}")
+                payload_str = message_data['postback']['payload']
                 
-                if payload.get('action') == 'watch_video':
-                    logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
-                    handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
-                elif payload.get('action') == 'activate_youtube':
-                    logger.info(f"Activation du mode YouTube pour l'utilisateur: {sender_id}")
-                    user_states[sender_id] = 'youtube'
-                    send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
-                elif payload.get('action') == 'activate_mistral':
-                    logger.info(f"Activation du mode Mistral pour l'utilisateur: {sender_id}")
-                    user_states[sender_id] = 'mistral'
-                    send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
-                else:
-                    logger.info(f"Action de postback non reconnue: {payload.get('action')}")
+                # Gérer le cas spécial du bouton Get Started
+                if payload_str == 'GET_STARTED':
+                    logger.info(f"Postback GET_STARTED reçu pour l'utilisateur: {sender_id}")
+                    send_welcome_message(sender_id)
+                    return
+                
+                # Traiter les autres postbacks
+                try:
+                    payload = json.loads(payload_str)
+                    logger.info(f"Payload du postback: {json.dumps(payload)}")
+                    
+                    if payload.get('action') == 'watch_video':
+                        logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
+                        handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
+                    elif payload.get('action') == 'activate_youtube':
+                        logger.info(f"Activation du mode YouTube pour l'utilisateur: {sender_id}")
+                        user_states[sender_id] = 'youtube'
+                        send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
+                    elif payload.get('action') == 'activate_mistral':
+                        logger.info(f"Activation du mode Mistral pour l'utilisateur: {sender_id}")
+                        user_states[sender_id] = 'mistral'
+                        send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
+                    else:
+                        logger.info(f"Action de postback non reconnue: {payload.get('action')}")
+                except json.JSONDecodeError:
+                    logger.error(f"Impossible de décoder le payload JSON: {payload_str}")
+                    send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre demande. Veuillez réessayer plus tard.")
             except Exception as e:
                 logger.error(f"Erreur lors du traitement du postback: {str(e)}")
                 send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre demande. Veuillez réessayer plus tard.")
@@ -122,6 +135,38 @@ def handle_message(sender_id, message_data):
         send_text_message(sender_id, error_message)
     
     logger.info("Fin de handle_message")
+
+def send_welcome_message(sender_id):
+    """
+    Envoie un message de bienvenue à l'utilisateur qui démarre la conversation
+    """
+    logger.info(f"Envoi du message de bienvenue à l'utilisateur: {sender_id}")
+    
+    # Définir l'état par défaut de l'utilisateur
+    user_states[sender_id] = 'mistral'
+    
+    # Envoyer un message de bienvenue
+    welcome_message = (
+        "👋 Bonjour ! Je suis JekleBot, votre assistant virtuel.\n\n"
+        "Je peux vous aider de deux façons :\n"
+        "🧠 Répondre à vos questions et discuter avec vous\n"
+        "🎬 Rechercher et télécharger des vidéos YouTube\n\n"
+        "Utilisez le menu persistant en bas pour changer de mode à tout moment."
+    )
+    
+    send_text_message(sender_id, welcome_message)
+    
+    # Envoyer un message pour expliquer comment utiliser le bot
+    help_message = (
+        "📝 Quelques commandes utiles :\n"
+        "- /yt : Activer le mode YouTube\n"
+        "- yt/ : Revenir au mode conversation\n"
+        "- /reset : Effacer l'historique de conversation\n"
+        "- /retry [ID] : Réessayer le téléchargement d'une vidéo\n\n"
+        "Comment puis-je vous aider aujourd'hui ?"
+    )
+    
+    send_text_message(sender_id, help_message)
 
 def delete_video_from_db(video_id):
     """
@@ -514,7 +559,7 @@ def handle_watch_video(recipient_id, video_id, title, force_download=False):
     except Exception as e:
         logger.error(f"Erreur lors du traitement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
-        send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+        send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v  je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
         send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
 
 def send_video_message(recipient_id, video_url):
@@ -658,11 +703,52 @@ def call_send_api(message_data):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
+def setup_get_started_button():
+    """
+    Configure le bouton Get Started du bot Messenger
+    """
+    logger.info("Configuration du bouton Get Started")
+    
+    if not MESSENGER_ACCESS_TOKEN:
+        logger.error("Token d'accès Messenger manquant, impossible de configurer le bouton Get Started")
+        return False
+    
+    url = f"https://graph.facebook.com/v18.0/me/messenger_profile?access_token={MESSENGER_ACCESS_TOKEN}"
+    
+    payload = {
+        "get_started": {
+            "payload": "GET_STARTED"
+        }
+    }
+    
+    try:
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de la configuration du bouton Get Started: {response.status_code} - {response.text}")
+            return False
+        
+        logger.info(f"Bouton Get Started configuré avec succès: {response.json()}")
+        return True
+    except Exception as e:
+        logger.error(f"Erreur lors de la configuration du bouton Get Started: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
 def setup_persistent_menu():
     """
     Configure le menu persistant du bot Messenger
     """
     logger.info("Configuration du menu persistant")
+    
+    # D'abord, configurer le bouton Get Started
+    if not setup_get_started_button():
+        logger.error("Impossible de configurer le menu persistant car le bouton Get Started n'a pas pu être configuré")
+        return False
     
     if not MESSENGER_ACCESS_TOKEN:
         logger.error("Token d'accès Messenger manquant, impossible de configurer le menu persistant")
