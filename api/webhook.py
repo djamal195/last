@@ -24,6 +24,9 @@ def init_app():
     global app_initialized
     if not app_initialized:
         logger.info("Initialisation de l'application...")
+        # Configurer le menu persistant
+        from src.messenger_api import setup_persistent_menu
+        setup_persistent_menu()
         # Ajouter ici toute initialisation nécessaire
         app_initialized = True
         logger.info("Application initialisée avec succès")
