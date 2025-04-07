@@ -12,6 +12,7 @@ from src.mistral_api import generate_mistral_response
 from src.conversation_memory import clear_user_history
 from src.youtube_api import search_youtube, download_youtube_video
 from src.cloudinary_service import upload_file, delete_file
+from src.dalle_api import generate_image, save_generated_image
 
 logger = get_logger(__name__)
 
@@ -71,6 +72,33 @@ def handle_message(sender_id, message_data):
                         send_text_message(sender_id, f"Désolé, je n'ai pas pu récupérer les détails de la vidéo {video_id}.")
                 else:
                     send_text_message(sender_id, "Format incorrect. Utilisez /retry VIDEO_ID")
+            elif text.startswith('/img '):
+                # Commande pour générer une image avec DALL-E
+                prompt = message_data['text'][5:].strip()  # Extraire le prompt après "/img "
+                if prompt:
+                    logger.info(f"Génération d'image pour le prompt: {prompt}")
+                    send_text_message(sender_id, f"Génération de l'image en cours pour: {prompt}. Cela peut prendre quelques instants...")
+                    
+                    # Générer l'image
+                    image_data = generate_image(prompt)
+                    if image_data:
+                        # Sauvegarder l'image
+                        image_path = save_generated_image(image_data)
+                        if image_path:
+                            if isinstance(image_path, str) and image_path.startswith("http"):
+                                # Si c'est une URL, envoyer l'image via l'URL
+                                send_text_message(sender_id, "Voici l'image générée:")
+                                send_image_message(sender_id, image_path)
+                            else:
+                                # Si c'est un chemin de fichier, envoyer le fichier
+                                send_text_message(sender_id, "Voici l'image générée:")
+                                send_file_attachment(sender_id, image_path, "image")
+                        else:
+                            send_text_message(sender_id, "Désolé, je n'ai pas pu sauvegarder l'image générée.")
+                    else:
+                        send_text_message(sender_id, "Désolé, je n'ai pas pu générer l'image. Veuillez réessayer plus tard.")
+                else:
+                    send_text_message(sender_id, "Veuillez fournir une description pour l'image. Exemple: /img un chat jouant du piano")
             elif sender_id in user_states and user_states[sender_id] == 'youtube':
                 logger.info(f"Recherche YouTube pour: {message_data['text']}")
                 try:
@@ -91,35 +119,14 @@ def handle_message(sender_id, message_data):
         elif 'postback' in message_data:
             logger.info(f"Traitement du postback: {json.dumps(message_data['postback'])}")
             try:
-                payload_str = message_data['postback']['payload']
+                payload = json.loads(message_data['postback']['payload'])
+                logger.info(f"Payload du postback: {json.dumps(payload)}")
                 
-                # Gérer le cas spécial du bouton Get Started
-                if payload_str == 'GET_STARTED':
-                    logger.info(f"Postback GET_STARTED reçu pour l'utilisateur: {sender_id}")
-                    send_welcome_message(sender_id)
-                    return
-                
-                # Traiter les autres postbacks
-                try:
-                    payload = json.loads(payload_str)
-                    logger.info(f"Payload du postback: {json.dumps(payload)}")
-                    
-                    if payload.get('action') == 'watch_video':
-                        logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
-                        handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
-                    elif payload.get('action') == 'activate_youtube':
-                        logger.info(f"Activation du mode YouTube pour l'utilisateur: {sender_id}")
-                        user_states[sender_id] = 'youtube'
-                        send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
-                    elif payload.get('action') == 'activate_mistral':
-                        logger.info(f"Activation du mode Mistral pour l'utilisateur: {sender_id}")
-                        user_states[sender_id] = 'mistral'
-                        send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
-                    else:
-                        logger.info(f"Action de postback non reconnue: {payload.get('action')}")
-                except json.JSONDecodeError:
-                    logger.error(f"Impossible de décoder le payload JSON: {payload_str}")
-                    send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre demande. Veuillez réessayer plus tard.")
+                if payload.get('action') == 'watch_video':
+                    logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
+                    handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
+                else:
+                    logger.info(f"Action de postback non reconnue: {payload.get('action')}")
             except Exception as e:
                 logger.error(f"Erreur lors du traitement du postback: {str(e)}")
                 send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre demande. Veuillez réessayer plus tard.")
@@ -135,38 +142,6 @@ def handle_message(sender_id, message_data):
         send_text_message(sender_id, error_message)
     
     logger.info("Fin de handle_message")
-
-def send_welcome_message(sender_id):
-    """
-    Envoie un message de bienvenue à l'utilisateur qui démarre la conversation
-    """
-    logger.info(f"Envoi du message de bienvenue à l'utilisateur: {sender_id}")
-    
-    # Définir l'état par défaut de l'utilisateur
-    user_states[sender_id] = 'mistral'
-    
-    # Envoyer un message de bienvenue
-    welcome_message = (
-        "👋 Bonjour ! Je suis JekleBot, votre assistant virtuel.\n\n"
-        "Je peux vous aider de deux façons :\n"
-        "🧠 Répondre à vos questions et discuter avec vous\n"
-        "🎬 Rechercher et télécharger des vidéos YouTube\n\n"
-        "Utilisez le menu persistant en bas pour changer de mode à tout moment."
-    )
-    
-    send_text_message(sender_id, welcome_message)
-    
-    # Envoyer un message pour expliquer comment utiliser le bot
-    help_message = (
-        "📝 Quelques commandes utiles :\n"
-        "- /yt : Activer le mode YouTube\n"
-        "- yt/ : Revenir au mode conversation\n"
-        "- /reset : Effacer l'historique de conversation\n"
-        "- /retry [ID] : Réessayer le téléchargement d'une vidéo\n\n"
-        "Comment puis-je vous aider aujourd'hui ?"
-    )
-    
-    send_text_message(sender_id, help_message)
 
 def delete_video_from_db(video_id):
     """
@@ -395,36 +370,6 @@ def handle_download_callback(recipient_id, video_id, title, result):
             send_text_message(recipient_id, f"Voici votre vidéo : {title}")
             send_video_response = send_video_message(recipient_id, video_url)
             
-            # Si l'envoi a réussi, supprimer la vidéo de Cloudinary pour économiser de l'espace
-            if send_video_response:
-                logger.info(f"Vidéo envoyée avec succès, suppression de Cloudinary")
-                try:
-                    # Déterminer le type de ressource
-                    resource_type = "video"
-                    if "raw/upload" in video_url:
-                        resource_type = "raw"
-                    
-                    # Supprimer de Cloudinary
-                    public_id = f"youtube_{video_id}"
-                    delete_result = delete_file(public_id, resource_type)
-                    
-                    if delete_result and delete_result.get('result') == 'ok':
-                        logger.info(f"Vidéo supprimée de Cloudinary avec succès: {public_id}")
-                        
-                        # Mettre à jour la base de données pour indiquer que la vidéo a été supprimée de Cloudinary
-                        if db is not None:
-                            video_collection.update_one(
-                                {"video_id": video_id},
-                                {"$set": {
-                                    "cloudinary_deleted": True,
-                                    "cloudinary_deleted_at": time.time()
-                                }}
-                            )
-                    else:
-                        logger.warning(f"Échec de la suppression de la vidéo de Cloudinary: {delete_result}")
-                except Exception as e:
-                    logger.error(f"Erreur lors de la suppression de la vidéo de Cloudinary: {str(e)}")
-            
             if not send_video_response:
                 logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary")
                 # Envoyer le lien YouTube comme solution de secours
@@ -489,13 +434,12 @@ def handle_watch_video(recipient_id, video_id, title, force_download=False):
             if existing_video:
                 logger.info(f"Vidéo trouvée dans la base de données: {video_id}")
                 
-                # Vérifier si l'URL est de type raw ou si la vidéo a été supprimée de Cloudinary
+                # Vérifier si l'URL est de type raw
                 is_raw_url = existing_video.get('is_raw_url', False)
                 cloudinary_url = existing_video.get('cloudinary_url')
-                cloudinary_deleted = existing_video.get('cloudinary_deleted', False)
                 
-                if is_raw_url or (cloudinary_url and "raw/upload" in cloudinary_url) or cloudinary_deleted:
-                    logger.warning("URL Cloudinary de type 'raw' ou vidéo supprimée, nouveau téléchargement nécessaire")
+                if is_raw_url or (cloudinary_url and "raw/upload" in cloudinary_url):
+                    logger.warning("URL Cloudinary de type 'raw' trouvée dans la base de données, suppression et nouveau téléchargement")
                     delete_video_from_db(video_id)
                 else:
                     if cloudinary_url:
@@ -506,31 +450,6 @@ def handle_watch_video(recipient_id, video_id, title, force_download=False):
                             logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary stockée")
                             send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
                             send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
-                        else:
-                            # Si l'envoi a réussi, supprimer la vidéo de Cloudinary
-                            try:
-                                # Déterminer le type de ressource
-                                resource_type = "video"
-                                if "raw/upload" in cloudinary_url:
-                                    resource_type = "raw"
-                                
-                                # Supprimer de Cloudinary
-                                public_id = f"youtube_{video_id}"
-                                delete_result = delete_file(public_id, resource_type)
-                                
-                                if delete_result and delete_result.get('result') == 'ok':
-                                    logger.info(f"Vidéo supprimée de Cloudinary avec succès: {public_id}")
-                                    
-                                    # Mettre à jour la base de données
-                                    video_collection.update_one(
-                                        {"video_id": video_id},
-                                        {"$set": {
-                                            "cloudinary_deleted": True,
-                                            "cloudinary_deleted_at": time.time()
-                                        }}
-                                    )
-                            except Exception as e:
-                                logger.error(f"Erreur lors de la suppression de la vidéo de Cloudinary: {str(e)}")
                         return
         
         # Initialiser le dictionnaire des téléchargements en cours pour cet utilisateur
@@ -559,7 +478,7 @@ def handle_watch_video(recipient_id, video_id, title, force_download=False):
     except Exception as e:
         logger.error(f"Erreur lors du traitement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
-        send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v  je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
+        send_text_message(recipient_id, f"Désolé, je n'ai pas pu traiter cette vidéo. Voici le lien YouTube: https://www.youtube.com/watch?v={video_id}")
         send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
 
 def send_video_message(recipient_id, video_url):
@@ -597,6 +516,38 @@ def send_video_message(recipient_id, video_url):
     
     response = call_send_api(message_data)
     logger.info(f"Réponse de l'API pour l'envoi de vidéo: {json.dumps(response) if response else 'None'}")
+    return response
+
+def send_image_message(recipient_id, image_url):
+    """
+    Envoie un message image à l'utilisateur
+    
+    Args:
+        recipient_id: ID du destinataire
+        image_url: URL de l'image à envoyer
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
+    """
+    logger.info(f"Envoi de l'image à {recipient_id}: {image_url}")
+    
+    message_data = {
+        "recipient": {
+            "id": recipient_id
+        },
+        "message": {
+            "attachment": {
+                "type": "image",
+                "payload": {
+                    "url": image_url,
+                    "is_reusable": True
+                }
+            }
+        }
+    }
+    
+    response = call_send_api(message_data)
+    logger.info(f"Réponse de l'API pour l'envoi d'image: {json.dumps(response) if response else 'None'}")
     return response
 
 def send_file_attachment(recipient_id, file_path, attachment_type):
@@ -702,96 +653,4 @@ def call_send_api(message_data):
         logger.error(f"Erreur lors de l'appel à l'API Facebook: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
-
-def setup_get_started_button():
-    """
-    Configure le bouton Get Started du bot Messenger
-    """
-    logger.info("Configuration du bouton Get Started")
-    
-    if not MESSENGER_ACCESS_TOKEN:
-        logger.error("Token d'accès Messenger manquant, impossible de configurer le bouton Get Started")
-        return False
-    
-    url = f"https://graph.facebook.com/v18.0/me/messenger_profile?access_token={MESSENGER_ACCESS_TOKEN}"
-    
-    payload = {
-        "get_started": {
-            "payload": "GET_STARTED"
-        }
-    }
-    
-    try:
-        response = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            json=payload
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"Erreur lors de la configuration du bouton Get Started: {response.status_code} - {response.text}")
-            return False
-        
-        logger.info(f"Bouton Get Started configuré avec succès: {response.json()}")
-        return True
-    except Exception as e:
-        logger.error(f"Erreur lors de la configuration du bouton Get Started: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
-
-def setup_persistent_menu():
-    """
-    Configure le menu persistant du bot Messenger
-    """
-    logger.info("Configuration du menu persistant")
-    
-    # D'abord, configurer le bouton Get Started
-    if not setup_get_started_button():
-        logger.error("Impossible de configurer le menu persistant car le bouton Get Started n'a pas pu être configuré")
-        return False
-    
-    if not MESSENGER_ACCESS_TOKEN:
-        logger.error("Token d'accès Messenger manquant, impossible de configurer le menu persistant")
-        return False
-    
-    url = f"https://graph.facebook.com/v18.0/me/messenger_profile?access_token={MESSENGER_ACCESS_TOKEN}"
-    
-    payload = {
-        "persistent_menu": [
-            {
-                "locale": "default",
-                "composer_input_disabled": False,
-                "call_to_actions": [
-                    {
-                        "type": "postback",
-                        "title": "🎬 Regarder une vidéo",
-                        "payload": json.dumps({"action": "activate_youtube"})
-                    },
-                    {
-                        "type": "postback",
-                        "title": "🧠 Parler avec JekleBot",
-                        "payload": json.dumps({"action": "activate_mistral"})
-                    }
-                ]
-            }
-        ]
-    }
-    
-    try:
-        response = requests.post(
-            url,
-            headers={"Content-Type": "application/json"},
-            json=payload
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"Erreur lors de la configuration du menu persistant: {response.status_code} - {response.text}")
-            return False
-        
-        logger.info(f"Menu persistant configuré avec succès: {response.json()}")
-        return True
-    except Exception as e:
-        logger.error(f"Erreur lors de la configuration du menu persistant: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
 
