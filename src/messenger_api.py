@@ -350,6 +350,36 @@ def handle_download_callback(recipient_id, video_id, title, result):
             send_text_message(recipient_id, f"Voici votre vidéo : {title}")
             send_video_response = send_video_message(recipient_id, video_url)
             
+            # Si l'envoi a réussi, supprimer la vidéo de Cloudinary pour économiser de l'espace
+            if send_video_response:
+                logger.info(f"Vidéo envoyée avec succès, suppression de Cloudinary")
+                try:
+                    # Déterminer le type de ressource
+                    resource_type = "video"
+                    if "raw/upload" in video_url:
+                        resource_type = "raw"
+                    
+                    # Supprimer de Cloudinary
+                    public_id = f"youtube_{video_id}"
+                    delete_result = delete_file(public_id, resource_type)
+                    
+                    if delete_result and delete_result.get('result') == 'ok':
+                        logger.info(f"Vidéo supprimée de Cloudinary avec succès: {public_id}")
+                        
+                        # Mettre à jour la base de données pour indiquer que la vidéo a été supprimée de Cloudinary
+                        if db is not None:
+                            video_collection.update_one(
+                                {"video_id": video_id},
+                                {"$set": {
+                                    "cloudinary_deleted": True,
+                                    "cloudinary_deleted_at": time.time()
+                                }}
+                            )
+                    else:
+                        logger.warning(f"Échec de la suppression de la vidéo de Cloudinary: {delete_result}")
+                except Exception as e:
+                    logger.error(f"Erreur lors de la suppression de la vidéo de Cloudinary: {str(e)}")
+            
             if not send_video_response:
                 logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary")
                 # Envoyer le lien YouTube comme solution de secours
@@ -414,12 +444,13 @@ def handle_watch_video(recipient_id, video_id, title, force_download=False):
             if existing_video:
                 logger.info(f"Vidéo trouvée dans la base de données: {video_id}")
                 
-                # Vérifier si l'URL est de type raw
+                # Vérifier si l'URL est de type raw ou si la vidéo a été supprimée de Cloudinary
                 is_raw_url = existing_video.get('is_raw_url', False)
                 cloudinary_url = existing_video.get('cloudinary_url')
+                cloudinary_deleted = existing_video.get('cloudinary_deleted', False)
                 
-                if is_raw_url or (cloudinary_url and "raw/upload" in cloudinary_url):
-                    logger.warning("URL Cloudinary de type 'raw' trouvée dans la base de données, suppression et nouveau téléchargement")
+                if is_raw_url or (cloudinary_url and "raw/upload" in cloudinary_url) or cloudinary_deleted:
+                    logger.warning("URL Cloudinary de type 'raw' ou vidéo supprimée, nouveau téléchargement nécessaire")
                     delete_video_from_db(video_id)
                 else:
                     if cloudinary_url:
@@ -430,6 +461,31 @@ def handle_watch_video(recipient_id, video_id, title, force_download=False):
                             logger.error(f"Échec de l'envoi de la vidéo via Messenger avec l'URL Cloudinary stockée")
                             send_text_message(recipient_id, f"Voici le lien de la vidéo sur YouTube: https://www.youtube.com/watch?v={video_id}")
                             send_text_message(recipient_id, "Pour réessayer avec une autre méthode, envoyez: /retry " + video_id)
+                        else:
+                            # Si l'envoi a réussi, supprimer la vidéo de Cloudinary
+                            try:
+                                # Déterminer le type de ressource
+                                resource_type = "video"
+                                if "raw/upload" in cloudinary_url:
+                                    resource_type = "raw"
+                                
+                                # Supprimer de Cloudinary
+                                public_id = f"youtube_{video_id}"
+                                delete_result = delete_file(public_id, resource_type)
+                                
+                                if delete_result and delete_result.get('result') == 'ok':
+                                    logger.info(f"Vidéo supprimée de Cloudinary avec succès: {public_id}")
+                                    
+                                    # Mettre à jour la base de données
+                                    video_collection.update_one(
+                                        {"video_id": video_id},
+                                        {"$set": {
+                                            "cloudinary_deleted": True,
+                                            "cloudinary_deleted_at": time.time()
+                                        }}
+                                    )
+                            except Exception as e:
+                                logger.error(f"Erreur lors de la suppression de la vidéo de Cloudinary: {str(e)}")
                         return
         
         # Initialiser le dictionnaire des téléchargements en cours pour cet utilisateur
