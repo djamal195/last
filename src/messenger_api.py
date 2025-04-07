@@ -34,6 +34,71 @@ user_states = {}
 # Dictionnaire pour stocker les téléchargements en cours
 pending_downloads = {}
 
+def setup_persistent_menu():
+    """
+    Configure le menu persistant pour le bot Messenger
+    
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
+    """
+    try:
+        logger.info("Configuration du menu persistant")
+        
+        if not MESSENGER_ACCESS_TOKEN:
+            logger.error("Token d'accès Messenger manquant")
+            return None
+        
+        url = f"https://graph.facebook.com/v18.0/me/messenger_profile?access_token={MESSENGER_ACCESS_TOKEN}"
+        
+        # Définir le menu persistant
+        payload = {
+            "persistent_menu": [
+                {
+                    "locale": "default",
+                    "composer_input_disabled": False,
+                    "call_to_actions": [
+                        {
+                            "type": "postback",
+                            "title": "Mode YouTube",
+                            "payload": json.dumps({"action": "mode_youtube"})
+                        },
+                        {
+                            "type": "postback",
+                            "title": "Mode Mistral",
+                            "payload": json.dumps({"action": "mode_mistral"})
+                        },
+                        {
+                            "type": "postback",
+                            "title": "Générer une image",
+                            "payload": json.dumps({"action": "generate_image"})
+                        },
+                        {
+                            "type": "postback",
+                            "title": "Réinitialiser la conversation",
+                            "payload": json.dumps({"action": "reset_conversation"})
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de la configuration du menu persistant: {response.status_code} - {response.text}")
+            return None
+        
+        logger.info(f"Menu persistant configuré avec succès: {response.json()}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Erreur lors de la configuration du menu persistant: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 def handle_message(sender_id, message_data):
     """
     Gère les messages reçus des utilisateurs
@@ -125,6 +190,17 @@ def handle_message(sender_id, message_data):
                 if payload.get('action') == 'watch_video':
                     logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
                     handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
+                elif payload.get('action') == 'mode_youtube':
+                    user_states[sender_id] = 'youtube'
+                    send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
+                elif payload.get('action') == 'mode_mistral':
+                    user_states[sender_id] = 'mistral'
+                    send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
+                elif payload.get('action') == 'generate_image':
+                    send_text_message(sender_id, "Pour générer une image, envoyez une commande comme: /img un chat jouant du piano")
+                elif payload.get('action') == 'reset_conversation':
+                    clear_user_history(sender_id)
+                    send_text_message(sender_id, "Votre historique de conversation a été effacé. Je ne me souviens plus de nos échanges précédents.")
                 else:
                     logger.info(f"Action de postback non reconnue: {payload.get('action')}")
             except Exception as e:
