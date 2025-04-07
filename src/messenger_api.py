@@ -12,7 +12,7 @@ from src.mistral_api import generate_mistral_response
 from src.conversation_memory import clear_user_history
 from src.youtube_api import search_youtube, download_youtube_video
 from src.cloudinary_service import upload_file, delete_file
-from src.dalle_api import generate_image, save_generated_image
+from src.dalle_api import generate_image, save_generated_image, generate_and_upload_image
 
 logger = get_logger(__name__)
 
@@ -33,6 +33,9 @@ user_states = {}
 
 # Dictionnaire pour stocker les téléchargements en cours
 pending_downloads = {}
+
+# Dictionnaire pour stocker les générations d'images en cours
+pending_images = {}
 
 def setup_persistent_menu():
     """
@@ -144,24 +147,22 @@ def handle_message(sender_id, message_data):
                     logger.info(f"Génération d'image pour le prompt: {prompt}")
                     send_text_message(sender_id, f"Génération de l'image en cours pour: {prompt}. Cela peut prendre quelques instants...")
                     
-                    # Générer l'image
-                    image_data = generate_image(prompt)
-                    if image_data:
-                        # Sauvegarder l'image
-                        image_path = save_generated_image(image_data)
-                        if image_path:
-                            if isinstance(image_path, str) and image_path.startswith("http"):
-                                # Si c'est une URL, envoyer l'image via l'URL
-                                send_text_message(sender_id, "Voici l'image générée:")
-                                send_image_message(sender_id, image_path)
-                            else:
-                                # Si c'est un chemin de fichier, envoyer le fichier
-                                send_text_message(sender_id, "Voici l'image générée:")
-                                send_file_attachment(sender_id, image_path, "image")
-                        else:
-                            send_text_message(sender_id, "Désolé, je n'ai pas pu sauvegarder l'image générée.")
-                    else:
-                        send_text_message(sender_id, "Désolé, je n'ai pas pu générer l'image. Veuillez réessayer plus tard.")
+                    # Vérifier si une génération est déjà en cours pour cet utilisateur
+                    if sender_id in pending_images and pending_images[sender_id]:
+                        send_text_message(sender_id, "Une génération d'image est déjà en cours. Veuillez patienter.")
+                        return
+                    
+                    # Marquer la génération comme en cours
+                    if sender_id not in pending_images:
+                        pending_images[sender_id] = {}
+                    pending_images[sender_id] = True
+                    
+                    # Créer une fonction de callback pour la génération d'image
+                    def image_callback(result):
+                        handle_image_callback(sender_id, prompt, result)
+                    
+                    # Ajouter la génération à la file d'attente
+                    generate_and_upload_image(prompt, image_callback)
                 else:
                     send_text_message(sender_id, "Veuillez fournir une description pour l'image. Exemple: /img un chat jouant du piano")
             elif sender_id in user_states and user_states[sender_id] == 'youtube':
@@ -218,6 +219,92 @@ def handle_message(sender_id, message_data):
         send_text_message(sender_id, error_message)
     
     logger.info("Fin de handle_message")
+
+def handle_image_callback(sender_id, prompt, result):
+    """
+    Callback pour la génération d'image
+    
+    Args:
+        sender_id: ID du destinataire
+        prompt: Texte décrivant l'image
+        result: Résultat de la génération (chemin du fichier ou URL)
+    """
+    logger.info(f"Callback de génération d'image pour {sender_id}, prompt: {prompt}")
+    
+    try:
+        # Supprimer la génération en cours
+        if sender_id in pending_images:
+            pending_images[sender_id] = False
+        
+        # Si le résultat est None, envoyer un message d'erreur
+        if result is None:
+            send_text_message(sender_id, "Désolé, je n'ai pas pu générer l'image. Veuillez réessayer plus tard.")
+            return
+        
+        # Si le résultat est une URL, envoyer l'image via l'URL
+        if isinstance(result, str) and (result.startswith("http://") or result.startswith("https://")):
+            send_text_message(sender_id, "Voici l'image générée:")
+            send_image_message(sender_id, result)
+            return
+        
+        # Si le résultat est un chemin de fichier, vérifier qu'il existe
+        if not os.path.exists(result):
+            send_text_message(sender_id, "Désolé, je n'ai pas pu générer l'image. Veuillez réessayer plus tard.")
+            return
+        
+        logger.info(f"Image générée avec succès: {result}")
+        
+        # Essayer d'envoyer directement le fichier
+        try:
+            logger.info(f"Tentative d'envoi direct du fichier: {result}")
+            send_text_message(sender_id, "Voici l'image générée:")
+            send_file_attachment(sender_id, result, "image")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'envoi direct du fichier: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Si l'envoi direct échoue, essayer Cloudinary
+            try:
+                logger.info(f"Tentative de téléchargement sur Cloudinary: {result}")
+                
+                # Vérifier que le fichier existe et a une taille non nulle
+                if not os.path.exists(result) or os.path.getsize(result) == 0:
+                    logger.error(f"Fichier invalide pour Cloudinary: {result}, taille: {os.path.getsize(result) if os.path.exists(result) else 'N/A'}")
+                    raise Exception(f"Fichier invalide pour Cloudinary: {result}")
+                
+                # Télécharger sur Cloudinary
+                image_id = f"dalle_{int(time.time())}"
+                cloudinary_result = upload_file(result, image_id, "image")
+                
+                if not cloudinary_result or not cloudinary_result.get('secure_url'):
+                    logger.error("Échec du téléchargement sur Cloudinary")
+                    raise Exception("Échec du téléchargement sur Cloudinary")
+                    
+                image_url = cloudinary_result.get('secure_url')
+                logger.info(f"Image téléchargée sur Cloudinary: {image_url}")
+                
+                # Envoyer l'image à l'utilisateur
+                send_text_message(sender_id, "Voici l'image générée:")
+                send_image_message(sender_id, image_url)
+            except Exception as e:
+                logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Envoyer un message d'erreur
+                send_text_message(sender_id, "Désolé, je n'ai pas pu envoyer l'image générée. Veuillez réessayer plus tard.")
+        
+        # Nettoyer le répertoire temporaire
+        try:
+            if os.path.exists(result):
+                os.remove(result)
+                logger.info(f"Fichier temporaire nettoyé : {result}")
+        except Exception as e:
+            logger.error(f"Erreur lors du nettoyage du fichier temporaire: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"Erreur dans le callback de génération d'image: {str(e)}")
+        logger.error(traceback.format_exc())
+        send_text_message(sender_id, "Désolé, je n'ai pas pu traiter l'image générée. Veuillez réessayer plus tard.")
 
 def delete_video_from_db(video_id):
     """
@@ -714,6 +801,9 @@ def call_send_api(message_data):
     url = f"{MESSENGER_API_URL}?access_token={MESSENGER_ACCESS_TOKEN}"
     
     try:
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application 
         response = requests.post(
             url,
             headers={"Content-Type": "application/json"},
