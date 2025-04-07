@@ -3,7 +3,7 @@ import json
 import logging
 import atexit
 from flask import Flask, request, jsonify
-from src.messenger_api import handle_message
+from src.messenger_api import handle_message, setup_persistent_menu
 from src.utils.logger import get_logger
 from src.youtube_api import stop_download_thread
 
@@ -24,10 +24,8 @@ def init_app():
     global app_initialized
     if not app_initialized:
         logger.info("Initialisation de l'application...")
-        # Configurer le menu persistant
-        from src.messenger_api import setup_persistent_menu
+        # Configurer le menu persistant pour Messenger
         setup_persistent_menu()
-        # Ajouter ici toute initialisation nécessaire
         app_initialized = True
         logger.info("Application initialisée avec succès")
 
