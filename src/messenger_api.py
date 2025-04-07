@@ -97,6 +97,14 @@ def handle_message(sender_id, message_data):
                 if payload.get('action') == 'watch_video':
                     logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
                     handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
+                elif payload.get('action') == 'activate_youtube':
+                    logger.info(f"Activation du mode YouTube pour l'utilisateur: {sender_id}")
+                    user_states[sender_id] = 'youtube'
+                    send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
+                elif payload.get('action') == 'activate_mistral':
+                    logger.info(f"Activation du mode Mistral pour l'utilisateur: {sender_id}")
+                    user_states[sender_id] = 'mistral'
+                    send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
                 else:
                     logger.info(f"Action de postback non reconnue: {payload.get('action')}")
             except Exception as e:
@@ -593,4 +601,55 @@ def call_send_api(message_data):
         logger.error(f"Erreur lors de l'appel à l'API Facebook: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
+
+def setup_persistent_menu():
+    """
+    Configure le menu persistant du bot Messenger
+    """
+    logger.info("Configuration du menu persistant")
+    
+    if not MESSENGER_ACCESS_TOKEN:
+        logger.error("Token d'accès Messenger manquant, impossible de configurer le menu persistant")
+        return False
+    
+    url = f"https://graph.facebook.com/v18.0/me/messenger_profile?access_token={MESSENGER_ACCESS_TOKEN}"
+    
+    payload = {
+        "persistent_menu": [
+            {
+                "locale": "default",
+                "composer_input_disabled": False,
+                "call_to_actions": [
+                    {
+                        "type": "postback",
+                        "title": "🎬 Regarder une vidéo",
+                        "payload": json.dumps({"action": "activate_youtube"})
+                    },
+                    {
+                        "type": "postback",
+                        "title": "🧠 Parler avec JekleBot",
+                        "payload": json.dumps({"action": "activate_mistral"})
+                    }
+                ]
+            }
+        ]
+    }
+    
+    try:
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de la configuration du menu persistant: {response.status_code} - {response.text}")
+            return False
+        
+        logger.info(f"Menu persistant configuré avec succès: {response.json()}")
+        return True
+    except Exception as e:
+        logger.error(f"Erreur lors de la configuration du menu persistant: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
