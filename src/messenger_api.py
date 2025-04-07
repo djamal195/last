@@ -59,22 +59,22 @@ def setup_persistent_menu():
                     "call_to_actions": [
                         {
                             "type": "postback",
-                            "title": "Mode YouTube",
+                            "title": "🎬 Mode YouTube",
                             "payload": json.dumps({"action": "mode_youtube"})
                         },
                         {
                             "type": "postback",
-                            "title": "Mode Mistral",
+                            "title": "🧠 Mode Mistral",
                             "payload": json.dumps({"action": "mode_mistral"})
                         },
                         {
                             "type": "postback",
-                            "title": "Générer une image",
+                            "title": "🖼️ Générer une image",
                             "payload": json.dumps({"action": "generate_image"})
                         },
                         {
                             "type": "postback",
-                            "title": "Réinitialiser la conversation",
+                            "title": "🔄 Réinitialiser la conversation",
                             "payload": json.dumps({"action": "reset_conversation"})
                         }
                     ]
@@ -190,10 +190,10 @@ def handle_message(sender_id, message_data):
                 if payload.get('action') == 'watch_video':
                     logger.info(f"Action watch_video détectée pour videoId: {payload.get('videoId')}")
                     handle_watch_video(sender_id, payload.get('videoId'), payload.get('title', 'Vidéo YouTube'))
-                elif payload.get('action') == 'mode_youtube':
+                elif payload.get('action') == 'activate_youtube' or payload.get('action') == 'mode_youtube':
                     user_states[sender_id] = 'youtube'
                     send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
-                elif payload.get('action') == 'mode_mistral':
+                elif payload.get('action') == 'activate_mistral' or payload.get('action') == 'mode_mistral':
                     user_states[sender_id] = 'mistral'
                     send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
                 elif payload.get('action') == 'generate_image':
