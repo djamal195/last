@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify
 from src.messenger_api import handle_message, setup_persistent_menu
 from src.utils.logger import get_logger
 from src.youtube_api import stop_download_thread
+from src.dalle_api import stop_image_thread
 
 # Configurer le logger
 logger = get_logger(__name__)
@@ -37,6 +38,7 @@ init_app()
 def cleanup():
     logger.info("Nettoyage avant l'arrêt de l'application")
     stop_download_thread()
+    stop_image_thread()
 
 # Route pour la vérification de l'état de l'application
 @app.route('/health', methods=['GET'])
