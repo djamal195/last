@@ -277,7 +277,15 @@ def download_image_from_url(url: str) -> Optional[str]:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         }
-        
+
+        # Add RapidAPI headers if the URL is from the RapidAPI service
+        if "prlabsapi.com/matagimage" in url or "chatgpt-42.p.rapidapi.com" in url:
+            headers.update({
+                'x-rapidapi-key': RAPIDAPI_KEY,
+                'x-rapidapi-host': RAPIDAPI_HOST
+            })
+            logger.info("Added RapidAPI headers for image download")
+
         response = requests.get(url, stream=True, timeout=30, headers=headers)
         
         if response.status_code == 200:
@@ -469,4 +477,3 @@ def stop_image_thread():
         logger.error(f"Erreur lors de la sauvegarde de la file d'attente: {str(e)}")
     
     logger.info("Thread de génération d'images arrêté")
-
