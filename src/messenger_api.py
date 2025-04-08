@@ -691,44 +691,30 @@ def handle_image_callback(sender_id, prompt, result):
         
         logger.info(f"Image générée avec succès: {result}")
         
-        # Essayer d'envoyer directement le fichier
-        try:
-            logger.info(f"Tentative d'envoi direct du fichier: {result}")
-            send_text_message(sender_id, "Voici l'image générée:")
-            send_file_attachment(sender_id, result, "image")
-        except Exception as e:
-            logger.error(f"Erreur lors de l'envoi direct du fichier: {str(e)}")
-            logger.error(traceback.format_exc())
+        # Ne pas essayer d'envoyer directement le fichier, utiliser directement Cloudinary
+        logger.info(f"Téléchargement de l'image sur Cloudinary: {result}")
+
+        # Vérifier que le fichier existe et a une taille non nulle
+        if not os.path.exists(result) or os.path.getsize(result) == 0:
+            logger.error(f"Fichier invalide pour Cloudinary: {result}, taille: {os.path.getsize(result) if os.path.exists(result) else 'N/A'}")
+            send_text_message(sender_id, "Désolé, je n'ai pas pu générer l'image. Veuillez réessayer plus tard.")
+            return
+
+        # Télécharger sur Cloudinary
+        image_id = f"dalle_{int(time.time())}"
+        cloudinary_result = upload_file(result, image_id, "image")
+
+        if not cloudinary_result or not cloudinary_result.get('secure_url'):
+            logger.error("Échec du téléchargement sur Cloudinary")
+            send_text_message(sender_id, "Désolé, je n'ai pas pu envoyer l'image générée. Veuillez réessayer plus tard.")
+            return
             
-            # Si l'envoi direct échoue, essayer Cloudinary
-            try:
-                logger.info(f"Tentative de téléchargement sur Cloudinary: {result}")
-                
-                # Vérifier que le fichier existe et a une taille non nulle
-                if not os.path.exists(result) or os.path.getsize(result) == 0:
-                    logger.error(f"Fichier invalide pour Cloudinary: {result}, taille: {os.path.getsize(result) if os.path.exists(result) else 'N/A'}")
-                    raise Exception(f"Fichier invalide pour Cloudinary: {result}")
-                
-                # Télécharger sur Cloudinary
-                image_id = f"dalle_{int(time.time())}"
-                cloudinary_result = upload_file(result, image_id, "image")
-                
-                if not cloudinary_result or not cloudinary_result.get('secure_url'):
-                    logger.error("Échec du téléchargement sur Cloudinary")
-                    raise Exception("Échec du téléchargement sur Cloudinary")
-                    
-                image_url = cloudinary_result.get('secure_url')
-                logger.info(f"Image téléchargée sur Cloudinary: {image_url}")
-                
-                # Envoyer l'image à l'utilisateur via l'URL Cloudinary
-                send_text_message(sender_id, "Voici l'image générée:")
-                send_image_message(sender_id, image_url)
-            except Exception as e:
-                logger.error(f"Erreur lors du téléchargement sur Cloudinary: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Envoyer un message d'erreur
-                send_text_message(sender_id, "Désolé, je n'ai pas pu envoyer l'image générée. Veuillez réessayer plus tard.")
+        image_url = cloudinary_result.get('secure_url')
+        logger.info(f"Image téléchargée sur Cloudinary: {image_url}")
+
+        # Envoyer l'image à l'utilisateur via l'URL Cloudinary
+        send_text_message(sender_id, "Voici l'image générée:")
+        send_image_message(sender_id, image_url)
         
         # Nettoyer le répertoire temporaire
         try:
