@@ -28,6 +28,219 @@ if MESSENGER_ACCESS_TOKEN:
 else:
     logger.warning("Token d'accès Messenger manquant. Vérifiez les variables d'environnement MESSENGER_ACCESS_TOKEN ou MESSENGER_PAGE_ACCESS_TOKEN")
 
+def send_text_message(recipient_id, text):
+    """
+    Envoie un message texte à un utilisateur
+    
+    Args:
+        recipient_id: ID du destinataire
+        text: Texte du message
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Envoi d'un message texte à {recipient_id}: {text[:50]}...")
+        
+        if not MESSENGER_ACCESS_TOKEN:
+            logger.error("Token d'accès Messenger manquant")
+            return None
+        
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text}
+        }
+        
+        response = requests.post(
+            f"{MESSENGER_API_URL}?access_token={MESSENGER_ACCESS_TOKEN}",
+            headers={"Content-Type": "application/json"},
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de l'envoi du message: {response.status_code} - {response.text}")
+            return None
+        
+        logger.info(f"Message envoyé avec succès: {response.json()}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi du message: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def send_image_message(recipient_id, image_url):
+    """
+    Envoie une image à un utilisateur
+    
+    Args:
+        recipient_id: ID du destinataire
+        image_url: URL de l'image
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Envoi d'une image à {recipient_id}: {image_url}")
+        
+        if not MESSENGER_ACCESS_TOKEN:
+            logger.error("Token d'accès Messenger manquant")
+            return None
+        
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {
+                "attachment": {
+                    "type": "image",
+                    "payload": {
+                        "url": image_url,
+                        "is_reusable": True
+                    }
+                }
+            }
+        }
+        
+        response = requests.post(
+            f"{MESSENGER_API_URL}?access_token={MESSENGER_ACCESS_TOKEN}",
+            headers={"Content-Type": "application/json"},
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de l'envoi de l'image: {response.status_code} - {response.text}")
+            return None
+        
+        logger.info(f"Image envoyée avec succès: {response.json()}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'image: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def send_video_message(recipient_id, video_url):
+    """
+    Envoie une vidéo à un utilisateur
+    
+    Args:
+        recipient_id: ID du destinataire
+        video_url: URL de la vidéo
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Envoi d'une vidéo à {recipient_id}: {video_url}")
+        
+        if not MESSENGER_ACCESS_TOKEN:
+            logger.error("Token d'accès Messenger manquant")
+            return None
+        
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {
+                "attachment": {
+                    "type": "video",
+                    "payload": {
+                        "url": video_url,
+                        "is_reusable": True
+                    }
+                }
+            }
+        }
+        
+        response = requests.post(
+            f"{MESSENGER_API_URL}?access_token={MESSENGER_ACCESS_TOKEN}",
+            headers={"Content-Type": "application/json"},
+            json=payload
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de l'envoi de la vidéo: {response.status_code} - {response.text}")
+            return None
+        
+        logger.info(f"Vidéo envoyée avec succès: {response.json()}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de la vidéo: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def send_file_attachment(recipient_id, file_path, attachment_type="file"):
+    """
+    Envoie un fichier à un utilisateur
+    
+    Args:
+        recipient_id: ID du destinataire
+        file_path: Chemin du fichier à envoyer
+        attachment_type: Type de pièce jointe (file, image, video, audio)
+        
+    Returns:
+        Réponse de l'API ou None en cas d'erreur
+    """
+    try:
+        logger.info(f"Envoi d'un fichier à {recipient_id}: {file_path}")
+        
+        if not MESSENGER_ACCESS_TOKEN:
+            logger.error("Token d'accès Messenger manquant")
+            return None
+        
+        # Vérifier que le fichier existe
+        if not os.path.exists(file_path):
+            logger.error(f"Le fichier n'existe pas: {file_path}")
+            return None
+        
+        # Déterminer le type MIME
+        import mimetypes
+        mime_type, _ = mimetypes.guess_type(file_path)
+        
+        if not mime_type:
+            # Si le type MIME ne peut pas être déterminé, essayer de le deviner à partir de l'extension
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ['.mp4', '.mov', '.avi', '.wmv', '.flv']:
+                mime_type = f"video/{ext[1:]}"
+                attachment_type = "video"
+            elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                mime_type = f"image/{ext[1:]}"
+                attachment_type = "image"
+            elif ext in ['.mp3', '.wav', '.ogg', '.m4a']:
+                mime_type = f"audio/{ext[1:]}"
+                attachment_type = "audio"
+            else:
+                mime_type = "application/octet-stream"
+                attachment_type = "file"
+        
+        # Préparer les données multipart
+        url = f"{MESSENGER_API_URL}?access_token={MESSENGER_ACCESS_TOKEN}"
+        
+        payload = {
+            "recipient": json.dumps({"id": recipient_id}),
+            "message": json.dumps({
+                "attachment": {
+                    "type": attachment_type,
+                    "payload": {
+                        "is_reusable": True
+                    }
+                }
+            })
+        }
+        
+        files = {
+            "filedata": (os.path.basename(file_path), open(file_path, "rb"), mime_type)
+        }
+        
+        # Envoyer la requête
+        response = requests.post(url, data=payload, files=files)
+        
+        if response.status_code != 200:
+            logger.error(f"Erreur lors de l'envoi du fichier: {response.status_code} - {response.text}")
+            return None
+        
+        logger.info(f"Fichier envoyé avec succès: {response.json()}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi du fichier: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
 # Dictionnaire pour stocker l'état des utilisateurs
 user_states = {}
 
@@ -77,7 +290,7 @@ def setup_persistent_menu():
                         },
                         {
                             "type": "postback",
-                            "title": "🔄 Réinitialiser la conversation",
+                            "title": "🔄 Reset conversation",
                             "payload": json.dumps({"action": "reset_conversation"})
                         }
                     ]
