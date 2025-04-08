@@ -803,9 +803,6 @@ def call_send_api(message_data):
     try:
         response = requests.post(
             url,
-            headers={"Content-Type": "application 
-        response = requests.post(
-            url,
             headers={"Content-Type": "application/json"},
             json=message_data
         )
@@ -819,4 +816,3 @@ def call_send_api(message_data):
         logger.error(f"Erreur lors de l'appel à l'API Facebook: {str(e)}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
-
