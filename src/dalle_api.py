@@ -17,6 +17,9 @@ logger = get_logger(__name__)
 RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
 RAPIDAPI_HOST = "chatgpt-42.p.rapidapi.com"
 
+# Alternative API host for image generation
+ALT_RAPIDAPI_HOST = "ai-image-generator3.p.rapidapi.com"
+
 # File d'attente pour les générations d'images
 image_queue = []
 image_queue_lock = threading.Lock()
@@ -39,6 +42,38 @@ def generate_image(prompt: str, width: int = 512, height: int = 512) -> Optional
     Returns:
         Dictionnaire contenant les informations de l'image générée ou None en cas d'erreur
     """
+    # First try with the alternative API
+    try:
+        logger.info(f"Génération d'image avec l'API alternative pour le prompt: {prompt}")
+        
+        url = "https://ai-image-generator3.p.rapidapi.com/generate"
+        
+        payload = {
+            "prompt": prompt,
+            "width": width,
+            "height": height
+        }
+        
+        headers = {
+            "content-type": "application/json",
+            "X-RapidAPI-Key": RAPIDAPI_KEY,
+            "X-RapidAPI-Host": ALT_RAPIDAPI_HOST
+        }
+        
+        response = requests.post(url, json=payload, headers=headers)
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            logger.info("Image générée avec succès via l'API alternative")
+            logger.info(f"Structure de la réponse: {list(response_data.keys())}")
+            return response_data
+        else:
+            logger.warning(f"Échec de la génération d'image avec l'API alternative: {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Erreur lors de la génération d'image avec l'API alternative: {str(e)}")
+        logger.error(traceback.format_exc())
+    
+    # If alternative API fails, try with the original API
     try:
         logger.info(f"Génération d'image pour le prompt: {prompt}")
         
@@ -87,17 +122,23 @@ def generate_image(prompt: str, width: int = 512, height: int = 512) -> Optional
 
 def save_generated_image(image_data: Dict[str, Any]) -> Optional[str]:
     """
-    Sauvegarde l'image générée dans un fichier temporaire ou retourne l'URL
+    Sauvegarde l'image générée dans un fichier temporaire
     
     Args:
         image_data: Données de l'image générée
         
     Returns:
-        Chemin du fichier image, URL de l'image, ou None en cas d'erreur
+        Chemin du fichier image ou None en cas d'erreur
     """
     try:
         # Journaliser les clés disponibles dans les données
         logger.info(f"Clés disponibles dans les données d'image: {list(image_data.keys())}")
+        
+        # Check for the alternative API response format
+        if "images" in image_data and isinstance(image_data["images"], list) and len(image_data["images"]) > 0:
+            image_url = image_data["images"][0]
+            logger.info(f"URL de l'image générée (API alternative): {image_url}")
+            return download_image_from_url(image_url)
         
         # Vérifier si les données contiennent une URL dans "generated_image"
         if "generated_image" in image_data:
@@ -285,7 +326,14 @@ def download_image_from_url(url: str) -> Optional[str]:
                 'x-rapidapi-host': RAPIDAPI_HOST
             })
             logger.info("Added RapidAPI headers for image download")
+        elif "ai-image-generator3.p.rapidapi.com" in url:
+            headers.update({
+                'x-rapidapi-key': RAPIDAPI_KEY,
+                'x-rapidapi-host': ALT_RAPIDAPI_HOST
+            })
+            logger.info("Added alternative RapidAPI headers for image download")
 
+        # Essayer de télécharger l'image avec les en-têtes appropriés
         response = requests.get(url, stream=True, timeout=30, headers=headers)
         
         if response.status_code == 200:
@@ -299,9 +347,75 @@ def download_image_from_url(url: str) -> Optional[str]:
                 return temp_file_path
             else:
                 logger.error(f"Fichier téléchargé invalide ou trop petit: {temp_file_path} ({os.path.getsize(temp_file_path) if os.path.exists(temp_file_path) else 'N/A'} octets)")
+                
+                # Si le téléchargement direct a échoué, essayer avec un proxy
+                try:
+                    logger.info(f"Tentative de téléchargement via un proxy pour: {url}")
+                    
+                    # Utiliser un service de proxy pour télécharger l'image
+                    proxy_url = f"https://images.weserv.nl/?url={url}"
+                    proxy_response = requests.get(proxy_url, stream=True, timeout=30)
+                    
+                    if proxy_response.status_code == 200:
+                        with open(temp_file_path, 'wb') as f:
+                            for chunk in proxy_response.iter_content(1024):
+                                f.write(chunk)
+                        
+                        # Vérifier que le fichier a été téléchargé correctement
+                        if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 100:
+                            logger.info(f"Image téléchargée via proxy et sauvegardée dans: {temp_file_path} ({os.path.getsize(temp_file_path)} octets)")
+                            return temp_file_path
+                except Exception as proxy_error:
+                    logger.error(f"Erreur lors du téléchargement via proxy: {str(proxy_error)}")
+                
+                # Si tout échoue, essayer de générer une image de remplacement
+                try:
+                    logger.info("Génération d'une image de remplacement")
+                    
+                    # Créer une image de remplacement avec un texte explicatif
+                    from PIL import Image, ImageDraw, ImageFont
+                    
+                    # Créer une image blanche de 512x512 pixels
+                    img = Image.new('RGB', (512, 512), color=(255, 255, 255))
+                    d = ImageDraw.Draw(img)
+                    
+                    # Ajouter un texte explicatif
+                    d.text((10, 10), "Image non disponible", fill=(0, 0, 0))
+                    d.text((10, 30), "L'image n'a pas pu être téléchargée", fill=(0, 0, 0))
+                    d.text((10, 50), f"URL: {url[:50]}...", fill=(0, 0, 0))
+                    
+                    # Sauvegarder l'image
+                    img.save(temp_file_path)
+                    
+                    logger.info(f"Image de remplacement générée et sauvegardée dans: {temp_file_path}")
+                    return temp_file_path
+                except Exception as fallback_error:
+                    logger.error(f"Erreur lors de la génération de l'image de remplacement: {str(fallback_error)}")
+                
                 return None
         else:
             logger.error(f"Erreur lors du téléchargement de l'image: {response.status_code}")
+            
+            # Si le téléchargement direct a échoué, essayer avec un proxy
+            try:
+                logger.info(f"Tentative de téléchargement via un proxy pour: {url}")
+                
+                # Utiliser un service de proxy pour télécharger l'image
+                proxy_url = f"https://images.weserv.nl/?url={url}"
+                proxy_response = requests.get(proxy_url, stream=True, timeout=30)
+                
+                if proxy_response.status_code == 200:
+                    with open(temp_file_path, 'wb') as f:
+                        for chunk in proxy_response.iter_content(1024):
+                            f.write(chunk)
+                    
+                    # Vérifier que le fichier a été téléchargé correctement
+                    if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 100:
+                        logger.info(f"Image téléchargée via proxy et sauvegardée dans: {temp_file_path} ({os.path.getsize(temp_file_path)} octets)")
+                        return temp_file_path
+            except Exception as proxy_error:
+                logger.error(f"Erreur lors du téléchargement via proxy: {str(proxy_error)}")
+            
             return None
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement de l'image: {str(e)}")
@@ -394,7 +508,7 @@ def process_image_queue():
                     image_path = save_generated_image(image_data)
                     
                     if image_path:
-                        # Si c'est un chemin de fichier, télécharger sur Cloudinary
+                        # Si c'est un chemin de fichier, vérifier qu'il existe
                         if os.path.exists(image_path):
                             try:
                                 # Télécharger l'image sur Cloudinary
@@ -405,9 +519,9 @@ def process_image_queue():
                                     image_url = cloudinary_result.get('secure_url')
                                     logger.info(f"Image téléchargée sur Cloudinary: {image_url}")
                                     
-                                    # Appeler le callback avec l'URL Cloudinary
+                                    # Appeler le callback avec le chemin du fichier
                                     if callback:
-                                        callback(image_url)
+                                        callback(image_path)
                                 else:
                                     logger.error("Échec du téléchargement sur Cloudinary")
                                     if callback:
@@ -418,9 +532,10 @@ def process_image_queue():
                                 if callback:
                                     callback(image_path)
                         else:
-                            # Si c'est une URL, appeler directement le callback
+                            # Si ce n'est pas un chemin de fichier valide, c'est probablement une URL
+                            logger.error(f"Chemin de fichier invalide: {image_path}")
                             if callback:
-                                callback(image_path)
+                                callback(None)
                     else:
                         logger.error("Échec de la sauvegarde de l'image")
                         if callback:
