@@ -720,7 +720,7 @@ def handle_image_callback(sender_id, prompt, result):
                 image_url = cloudinary_result.get('secure_url')
                 logger.info(f"Image téléchargée sur Cloudinary: {image_url}")
                 
-                # Envoyer l'image à l'utilisateur
+                # Envoyer l'image à l'utilisateur via l'URL Cloudinary
                 send_text_message(sender_id, "Voici l'image générée:")
                 send_image_message(sender_id, image_url)
             except Exception as e:
