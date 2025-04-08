@@ -638,7 +638,6 @@ def handle_message(sender_id, message_data):
                     user_states[sender_id] = 'youtube'
                     send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
                 elif payload.get('action') == 'activate_mistral' or payload.get('action') == 'mode_mistral':
-                    user_states[sender_id] =  or payload.get('action') == 'mode_mistral':
                     user_states[sender_id] = 'mistral'
                     send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
                 elif payload.get('action') == 'generate_image':
