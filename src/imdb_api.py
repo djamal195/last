@@ -38,8 +38,8 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         # Encoder la requête pour l'URL
         encoded_query = query.replace(" ", "%20")
         
-        # Faire la requête à l'API
-        conn.request("GET", f"/api/v1/search?query={encoded_query}&limit={limit}", headers=headers)
+        # Faire la requête à l'API de recherche
+        conn.request("GET", f"/api/search?count={limit}&q={encoded_query}", headers=headers)
         
         # Récupérer la réponse
         res = conn.getresponse()
@@ -55,10 +55,10 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         
         # Extraire les résultats
         results = []
-        for item in response_data.get("data", {}).get("results", [])[:limit]:
+        for item in response_data.get("results", [])[:limit]:
             # Déterminer le type (film ou série)
             item_type = "film"
-            if item.get("titleType") == "tvSeries" or "TV Series" in item.get("titleDescription", ""):
+            if item.get("type") == "TV_SERIES" or item.get("type") == "TV_SHOW":
                 item_type = "série"
             
             # Construire l'URL IMDb
@@ -66,17 +66,13 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
             
             # Extraire l'image
-            image_url = item.get("image", {}).get("url", "")
+            image_url = item.get("image", "")
             
             # Extraire l'année
-            year = ""
-            title_description = item.get("titleDescription", "")
-            year_match = re.search(r'$$(\d{4})$$', title_description)
-            if year_match:
-                year = year_match.group(1)
+            year = item.get("year", "")
             
             # Extraire les stars/acteurs
-            stars = item.get("stars", "")
+            stars = ", ".join(item.get("stars", []))
             
             # Ajouter le résultat
             results.append({
@@ -88,6 +84,57 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                 "year": year,
                 "stars": stars
             })
+        
+        # Si aucun résultat, essayer avec l'API d'autocomplétion
+        if not results:
+            logger.info(f"Aucun résultat trouvé avec l'API de recherche, essai avec l'API d'autocomplétion")
+            
+            # Créer une nouvelle connexion
+            conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
+            
+            # Faire la requête à l'API d'autocomplétion
+            conn.request("GET", f"/api/autocomplete?q={encoded_query}", headers=headers)
+            
+            # Récupérer la réponse
+            res = conn.getresponse()
+            data = res.read()
+            
+            # Vérifier le code de statut
+            if res.status != 200:
+                logger.error(f"Erreur lors de l'autocomplétion IMDb: {res.status} - {data.decode('utf-8', errors='ignore')}")
+                return []
+            
+            # Analyser la réponse JSON
+            autocomplete_data = json.loads(data.decode("utf-8"))
+            
+            # Extraire les résultats
+            for item in autocomplete_data.get("results", [])[:limit]:
+                # Déterminer le type (film ou série)
+                item_type = "film"
+                if "TV Series" in item.get("description", ""):
+                    item_type = "série"
+                
+                # Construire l'URL IMDb
+                imdb_id = item.get("id", "")
+                imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
+                
+                # Extraire l'année
+                year = ""
+                description = item.get("description", "")
+                year_match = re.search(r'(\d{4})', description)
+                if year_match:
+                    year = year_match.group(1)
+                
+                # Ajouter le résultat
+                results.append({
+                    "title": item.get("title", "Titre inconnu"),
+                    "type": item_type,
+                    "imdb_id": imdb_id,
+                    "imdb_url": imdb_url,
+                    "image_url": item.get("image", ""),
+                    "year": year,
+                    "stars": description
+                })
         
         logger.info(f"Résultats de la recherche IMDb: {len(results)} trouvés")
         return results
@@ -119,7 +166,7 @@ def get_imdb_details(imdb_id: str) -> Optional[Dict[str, Any]]:
         }
         
         # Faire la requête à l'API
-        conn.request("GET", f"/api/v1/movie/details?id={imdb_id}", headers=headers)
+        conn.request("GET", f"/api/title/{imdb_id}", headers=headers)
         
         # Récupérer la réponse
         res = conn.getresponse()
@@ -134,30 +181,30 @@ def get_imdb_details(imdb_id: str) -> Optional[Dict[str, Any]]:
         response_data = json.loads(data.decode("utf-8"))
         
         # Extraire les données du film/série
-        movie_data = response_data.get("data", {})
+        movie_data = response_data
         
-        # Extraire les détails
-        title = movie_data.get("title", "")
-        type_data = movie_data.get("contentType", "")
-        item_type = "film" if type_data == "Movie" else "série"
+        # Déterminer le type (film ou série)
+        item_type = "film"
+        if movie_data.get("type") == "TV_SERIES" or movie_data.get("type") == "TV_SHOW":
+            item_type = "série"
         
         # Construire l'URL IMDb
         imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
         
         # Extraire l'image
-        image_url = movie_data.get("image", {}).get("url", "")
+        image_url = movie_data.get("image", "")
         
         # Extraire l'année
         year = movie_data.get("year", "")
         
         # Extraire la note
-        rating = movie_data.get("rating", {}).get("rating", "")
+        rating = movie_data.get("rating", "")
         
         # Extraire le synopsis
         plot = movie_data.get("plot", "")
         
         return {
-            "title": title,
+            "title": movie_data.get("title", ""),
             "type": item_type,
             "imdb_id": imdb_id,
             "imdb_url": imdb_url,
