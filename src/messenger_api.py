@@ -693,8 +693,6 @@ def handle_image_callback(sender_id, prompt, result):
         logger.error(traceback.format_exc())
         send_text_message(sender_id, "Désolé, je n'ai pas pu traiter l'image générée. Veuillez réessayer plus tard.")
 
-# Ajouter ou modifier la fonction handle_watch_video pour ne pas dépendre de get_video_by_id
-
 def handle_watch_video(sender_id, video_id, title, force_download=False):
     """
     Gère la demande de téléchargement d'une vidéo YouTube
@@ -830,7 +828,7 @@ def handle_download_callback(sender_id, video_id, title, result):
                 
                 # Envoyer un message d'erreur
                 send_text_message(sender_id, "Désolé, je n'ai pas pu envoyer la vidéo. Vous pouvez la regarder directement sur YouTube: " + 
-                                 f"https://www.youtube.com/watch?v={video_id}")
+                               f"https://www.youtube.com/watch?v={video_id}")
         
         # Nettoyer le répertoire temporaire
         try:
@@ -867,8 +865,6 @@ def delete_video_from_db(video_id):
         logger.error(f"Erreur lors de la suppression de la vidéo de la base de données: {str(e)}")
         logger.error(traceback.format_exc())
         return False
-
-# Rechercher la fonction send_youtube_results et la remplacer par cette version qui utilise un carrousel
 
 def send_youtube_results(sender_id, videos):
     """
