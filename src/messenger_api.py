@@ -13,6 +13,8 @@ from src.conversation_memory import clear_user_history
 from src.youtube_api import search_youtube, download_youtube_video
 from src.cloudinary_service import upload_file, delete_file
 from src.dalle_api import generate_image, save_generated_image, generate_and_upload_image
+from src.imdb_api import search_imdb, get_imdb_details
+from src.google_sheets_api import add_imdb_request_to_sheet, get_imdb_requests
 
 logger = get_logger(__name__)
 
@@ -250,6 +252,9 @@ pending_downloads = {}
 # Dictionnaire pour stocker les générations d'images en cours
 pending_images = {}
 
+# Dictionnaire pour stocker les recherches IMDb en cours
+imdb_searches = {}
+
 def setup_persistent_menu():
     """
     Configure le menu persistant pour le bot Messenger
@@ -285,8 +290,8 @@ def setup_persistent_menu():
                         },
                         {
                             "type": "postback",
-                            "title": "🖼️ Générer une image",
-                            "payload": json.dumps({"action": "generate_image"})
+                            "title": "🎥 Demander un film",
+                            "payload": json.dumps({"action": "request_movie"})
                         },
                         {
                             "type": "postback",
@@ -326,6 +331,12 @@ def handle_message(sender_id, message_data):
         if 'text' in message_data:
             text = message_data['text'].lower()
             
+            # Vérifier si l'utilisateur est en mode recherche IMDb
+            if sender_id in user_states and user_states[sender_id] == 'imdb_search':
+                # L'utilisateur a envoyé un titre de film ou série
+                handle_imdb_search(sender_id, message_data['text'])
+                return
+            
             if text == '/yt':
                 user_states[sender_id] = 'youtube'
                 send_text_message(sender_id, "Mode YouTube activé. Donnez-moi les mots-clés pour la recherche YouTube.")
@@ -336,6 +347,9 @@ def handle_message(sender_id, message_data):
                 # Commande pour effacer l'historique de conversation
                 clear_user_history(sender_id)
                 send_text_message(sender_id, "Votre historique de conversation a été effacé. Je ne me souviens plus de nos échanges précédents.")
+            elif text == '/stream' or text.startswith('/stream '):
+                # Commande pour rechercher un film ou une série
+                handle_stream_command(sender_id, text)
             elif text.startswith('/retry '):
                 # Commande pour réessayer le téléchargement d'une vidéo
                 video_id = text.split(' ')[1].strip()
@@ -412,6 +426,12 @@ def handle_message(sender_id, message_data):
                     send_text_message(sender_id, "Mode Mistral activé. Comment puis-je vous aider ?")
                 elif payload.get('action') == 'generate_image':
                     send_text_message(sender_id, "Pour générer une image, envoyez une commande comme: /img un chat jouant du piano")
+                elif payload.get('action') == 'request_movie':
+                    # Action pour demander un film ou une série
+                    handle_stream_command(sender_id, "/stream")
+                elif payload.get('action') == 'select_imdb':
+                    # Action pour sélectionner un résultat IMDb
+                    handle_imdb_selection(sender_id, payload.get('imdb_id'), payload.get('title'), payload.get('type'))
                 elif payload.get('action') == 'reset_conversation':
                     clear_user_history(sender_id)
                     send_text_message(sender_id, "Votre historique de conversation a été effacé. Je ne me souviens plus de nos échanges précédents.")
@@ -432,6 +452,166 @@ def handle_message(sender_id, message_data):
         send_text_message(sender_id, error_message)
     
     logger.info("Fin de handle_message")
+
+def handle_stream_command(sender_id, text):
+    """
+    Gère la commande /stream pour rechercher un film ou une série
+    
+    Args:
+        sender_id: ID de l'utilisateur
+        text: Texte de la commande
+    """
+    try:
+        logger.info(f"Traitement de la commande stream pour {sender_id}: {text}")
+        
+        # Extraire le titre si fourni directement avec la commande
+        query = None
+        if text.startswith('/stream '):
+            query = text[8:].strip()
+        
+        if query:
+            # Si un titre est fourni directement, lancer la recherche
+            handle_imdb_search(sender_id, query)
+        else:
+            # Sinon, demander le titre
+            user_states[sender_id] = 'imdb_search'
+            send_text_message(sender_id, "Quel est le titre du film ou de la série que tu veux voir ?")
+    except Exception as e:
+        logger.error(f"Erreur lors du traitement de la commande stream: {str(e)}")
+        logger.error(traceback.format_exc())
+        send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre demande. Veuillez réessayer plus tard.")
+
+def handle_imdb_search(sender_id, query):
+    """
+    Gère la recherche IMDb
+    
+    Args:
+        sender_id: ID de l'utilisateur
+        query: Terme de recherche
+    """
+    try:
+        logger.info(f"Recherche IMDb pour {sender_id}: {query}")
+        
+        # Réinitialiser l'état de l'utilisateur
+        user_states[sender_id] = 'mistral'
+        
+        # Rechercher sur IMDb
+        results = search_imdb(query)
+        
+        if not results:
+            send_text_message(sender_id, "Désolé, je n'ai pas trouvé de résultats pour votre recherche. Veuillez essayer avec un autre titre.")
+            return
+        
+        # Stocker les résultats pour cet utilisateur
+        imdb_searches[sender_id] = results
+        
+        # Envoyer un message de confirmation
+        send_text_message(sender_id, f"J'ai trouvé {len(results)} résultats pour '{query}'. Voici les meilleurs résultats :")
+        
+        # Envoyer les résultats un par un
+        for result in results:
+            # Créer le message avec l'image et le bouton
+            title = result.get('title', 'Titre inconnu')
+            if result.get('year'):
+                title += f" ({result.get('year')})"
+            
+            # Déterminer le texte du bouton en fonction du type
+            button_text = "Ce film 🎬" if result.get('type') == "film" else "Cette série 📺"
+            
+            # Créer le message avec l'image et le bouton
+            message = {
+                "attachment": {
+                    "type": "template",
+                    "payload": {
+                        "template_type": "generic",
+                        "elements": [
+                            {
+                                "title": title,
+                                "image_url": result.get('image_url', ''),
+                                "subtitle": result.get('stars', ''),
+                                "buttons": [
+                                    {
+                                        "type": "postback",
+                                        "title": button_text,
+                                        "payload": json.dumps({
+                                            "action": "select_imdb",
+                                            "imdb_id": result.get('imdb_id', ''),
+                                            "title": result.get('title', ''),
+                                            "type": result.get('type', '')
+                                        })
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+            
+            # Envoyer le message
+            payload = {
+                "recipient": {"id": sender_id},
+                "message": message
+            }
+            
+            response = requests.post(
+                f"{MESSENGER_API_URL}?access_token={MESSENGER_ACCESS_TOKEN}",
+                headers={"Content-Type": "application/json"},
+                json=payload
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Erreur lors de l'envoi du résultat IMDb: {response.status_code} - {response.text}")
+            else:
+                logger.info(f"Résultat IMDb envoyé avec succès: {response.json()}")
+    except Exception as e:
+        logger.error(f"Erreur lors de la recherche IMDb: {str(e)}")
+        logger.error(traceback.format_exc())
+        send_text_message(sender_id, "Désolé, je n'ai pas pu effectuer la recherche. Veuillez réessayer plus tard.")
+
+def handle_imdb_selection(sender_id, imdb_id, title, item_type):
+    """
+    Gère la sélection d'un résultat IMDb
+    
+    Args:
+        sender_id: ID de l'utilisateur
+        imdb_id: ID IMDb du film ou de la série
+        title: Titre du film ou de la série
+        item_type: Type (film ou série)
+    """
+    try:
+        logger.info(f"Sélection IMDb pour {sender_id}: {imdb_id} - {title} ({item_type})")
+        
+        # Récupérer les détails complets
+        imdb_data = None
+        
+        # Chercher dans les résultats stockés
+        if sender_id in imdb_searches:
+            for result in imdb_searches[sender_id]:
+                if result.get('imdb_id') == imdb_id:
+                    imdb_data = result
+                    break
+        
+        # Si non trouvé, récupérer les détails via l'API
+        if not imdb_data:
+            imdb_data = get_imdb_details(imdb_id)
+        
+        if not imdb_data:
+            send_text_message(sender_id, "Désolé, je n'ai pas pu récupérer les détails de votre sélection. Veuillez réessayer plus tard.")
+            return
+        
+        # Ajouter la demande à Google Sheets
+        user_name = "Utilisateur"  # Idéalement, récupérer le nom de l'utilisateur via l'API Messenger
+        success = add_imdb_request_to_sheet(sender_id, user_name, imdb_data)
+        
+        # Envoyer un message de confirmation
+        if success:
+            send_text_message(sender_id, f"✅ Merci ! Ta demande pour '{title}' a bien été reçue.\nElle sera ajoutée sur Jekle dans les prochaines heures 👌")
+        else:
+            send_text_message(sender_id, f"✅ Merci ! Ta demande pour '{title}' a bien été reçue, mais je n'ai pas pu l'enregistrer dans la base de données. L'équipe sera informée manuellement.")
+    except Exception as e:
+        logger.error(f"Erreur lors de la sélection IMDb: {str(e)}")
+        logger.error(traceback.format_exc())
+        send_text_message(sender_id, "Désolé, je n'ai pas pu traiter votre sélection. Veuillez réessayer plus tard.")
 
 def handle_image_callback(sender_id, prompt, result):
     """
