@@ -50,68 +50,102 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         # Analyser la réponse JSON
         response_data = json.loads(data.decode("utf-8"))
         
-        # Journaliser la structure de la réponse pour le débogage
-        logger.info(f"Structure de la réponse: {list(response_data.keys())}")
+        # Journaliser le type de la réponse pour le débogage
+        logger.info(f"Type de la réponse: {type(response_data).__name__}")
         
         # Extraire les résultats
         results = []
-        items = response_data.get("results", [])
         
-        # Si aucun résultat n'est trouvé, vérifier d'autres clés possibles
-        if not items and "d" in response_data:
-            items = response_data.get("d", [])
+        # Gérer le cas où response_data est une liste
+        if isinstance(response_data, list):
+            items = response_data[:limit]
+        else:
+            # Si c'est un dictionnaire, chercher les résultats dans différentes clés possibles
+            items = response_data.get("results", [])
+            if not items and "d" in response_data:
+                items = response_data.get("d", [])
         
         for item in items[:limit]:
             # Déterminer le type (film ou série)
             item_type = "film"
-            description = item.get("description", "")
             
-            if not description and "qid" in item:
-                # Format alternatif
-                if item.get("qid") == "tvSeries" or item.get("q") == "TV series":
+            # Extraire la description (peut être dans différentes clés)
+            description = ""
+            if isinstance(item, dict):
+                description = item.get("description", "")
+                
+                # Vérifier d'autres formats possibles
+                if "qid" in item:
+                    if item.get("qid") == "tvSeries" or item.get("q") == "TV series":
+                        item_type = "série"
+                elif "TV Series" in description or "TV Show" in description:
                     item_type = "série"
-            elif "TV Series" in description or "TV Show" in description:
-                item_type = "série"
             
             # Extraire l'ID IMDb
-            imdb_id = item.get("id", "")
-            if not imdb_id and "id" in item:
+            imdb_id = ""
+            if isinstance(item, dict):
                 imdb_id = item.get("id", "")
+                
+                # Nettoyer l'ID si nécessaire
+                if imdb_id.startswith("/title/"):
+                    imdb_id = imdb_id.replace("/title/", "").rstrip("/")
+            elif isinstance(item, str):
+                # Si l'item est une chaîne, c'est peut-être directement l'ID
+                imdb_id = item
             
-            # Nettoyer l'ID si nécessaire
-            if imdb_id.startswith("/title/"):
-                imdb_id = imdb_id.replace("/title/", "").rstrip("/")
+            # Si on n'a pas d'ID valide, passer à l'item suivant
+            if not imdb_id:
+                continue
             
             # Construire l'URL IMDb
             imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
             
             # Extraire l'année
             year = ""
-            year_match = re.search(r'(\d{4})', description)
-            if year_match:
-                year = year_match.group(1)
-            elif "y" in item:
-                year = item.get("y", "")
+            if isinstance(item, dict):
+                if "year" in item:
+                    year = item.get("year", "")
+                elif "y" in item:
+                    year = item.get("y", "")
+                elif description:
+                    year_match = re.search(r'(\d{4})', description)
+                    if year_match:
+                        year = year_match.group(1)
             
-            # Extraire les stars/acteurs (si disponible dans la description)
-            stars = description
-            if not stars and "s" in item:
-                stars = item.get("s", "")
+            # Extraire les stars/acteurs
+            stars = ""
+            if isinstance(item, dict):
+                if "stars" in item:
+                    stars = item.get("stars", "")
+                elif "s" in item:
+                    stars = item.get("s", "")
+                elif description:
+                    stars = description
             
             # Extraire l'image
             image_url = ""
-            if "image" in item:
-                if isinstance(item["image"], dict):
-                    image_url = item["image"].get("url", "")
-                else:
-                    image_url = item.get("image", "")
-            elif "i" in item and isinstance(item["i"], dict):
-                image_url = item["i"].get("imageUrl", "")
+            if isinstance(item, dict):
+                if "image" in item:
+                    if isinstance(item["image"], dict):
+                        image_url = item["image"].get("url", "")
+                    else:
+                        image_url = item.get("image", "")
+                elif "i" in item and isinstance(item["i"], dict):
+                    image_url = item["i"].get("imageUrl", "")
             
             # Extraire le titre
-            title = item.get("title", "")
-            if not title and "l" in item:
-                title = item.get("l", "Titre inconnu")
+            title = ""
+            if isinstance(item, dict):
+                if "title" in item:
+                    title = item.get("title", "")
+                elif "l" in item:
+                    title = item.get("l", "")
+                elif "name" in item:
+                    title = item.get("name", "")
+            
+            # Si on n'a pas de titre, utiliser l'ID
+            if not title:
+                title = f"Titre {imdb_id}"
             
             # Ajouter le résultat
             results.append({
@@ -170,41 +204,60 @@ def get_imdb_details(imdb_id: str) -> Optional[Dict[str, Any]]:
         # Analyser la réponse JSON
         movie_data = json.loads(data.decode("utf-8"))
         
-        # Journaliser la structure de la réponse pour le débogage
-        logger.info(f"Structure de la réponse des détails: {list(movie_data.keys())}")
+        # Vérifier si la réponse est une liste ou un dictionnaire
+        if isinstance(movie_data, list):
+            # Si c'est une liste, prendre le premier élément s'il existe
+            if movie_data:
+                movie_data = movie_data[0]
+            else:
+                return fallback_get_details(imdb_id)
+        
+        # Journaliser le type de la réponse pour le débogage
+        logger.info(f"Type des détails: {type(movie_data).__name__}")
         
         # Déterminer le type (film ou série)
         item_type = "film"
-        if movie_data.get("type") == "TV Series" or movie_data.get("type") == "TV Show":
-            item_type = "série"
+        if isinstance(movie_data, dict):
+            type_value = movie_data.get("type", "")
+            if type_value == "TV Series" or type_value == "TV Show":
+                item_type = "série"
         
         # Construire l'URL IMDb
         imdb_url = f"https://www.imdb.com/title/{imdb_id}/"
         
         # Extraire l'image
         image_url = ""
-        if "image" in movie_data:
+        if isinstance(movie_data, dict) and "image" in movie_data:
             if isinstance(movie_data["image"], dict):
                 image_url = movie_data["image"].get("url", "")
             else:
                 image_url = movie_data.get("image", "")
         
         # Extraire l'année
-        year = movie_data.get("year", "")
+        year = ""
+        if isinstance(movie_data, dict):
+            year = movie_data.get("year", "")
         
         # Extraire la note
         rating = ""
-        if "rating" in movie_data:
+        if isinstance(movie_data, dict) and "rating" in movie_data:
             if isinstance(movie_data["rating"], dict):
                 rating = movie_data["rating"].get("rating", "")
             else:
                 rating = movie_data.get("rating", "")
         
         # Extraire le synopsis
-        plot = movie_data.get("plot", "")
+        plot = ""
+        if isinstance(movie_data, dict):
+            plot = movie_data.get("plot", "")
+        
+        # Extraire le titre
+        title = "Titre inconnu"
+        if isinstance(movie_data, dict):
+            title = movie_data.get("title", "Titre inconnu")
         
         return {
-            "title": movie_data.get("title", "Titre inconnu"),
+            "title": title,
             "type": item_type,
             "imdb_id": imdb_id,
             "imdb_url": imdb_url,
@@ -248,12 +301,19 @@ def fallback_get_details(imdb_id: str) -> Dict[str, Any]:
         if res.status == 200:
             response_data = json.loads(data.decode("utf-8"))
             
-            # Chercher dans les résultats
-            items = response_data.get("results", [])
-            if not items and "d" in response_data:
-                items = response_data.get("d", [])
+            # Vérifier si la réponse est une liste ou un dictionnaire
+            if isinstance(response_data, list):
+                items = response_data
+            else:
+                # Chercher dans les résultats
+                items = response_data.get("results", [])
+                if not items and "d" in response_data:
+                    items = response_data.get("d", [])
             
             for item in items:
+                if not isinstance(item, dict):
+                    continue
+                
                 item_id = item.get("id", "")
                 if item_id.startswith("/title/"):
                     item_id = item_id.replace("/title/", "").rstrip("/")
