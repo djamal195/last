@@ -518,6 +518,14 @@ def handle_imdb_search(sender_id, query):
             # Déterminer le texte du bouton en fonction du type
             button_text = "Ce film 🎬" if result.get('type') == "film" else "Cette série 📺"
             
+            # S'assurer que l'URL de l'image est valide
+            image_url = result.get('image_url', '')
+            if not image_url:
+                image_url = "https://m.media-amazon.com/images/M/MV5BMTg1MTY2MjYzNV5BMl5BanBnXkFtZTgwMTc4NTMwNDI@._V1_UX182_CR0,0,182,268_AL_.jpg"
+            
+            # Journaliser l'URL de l'image pour le débogage
+            logger.info(f"Envoi d'un résultat IMDb avec l'image: {image_url}")
+            
             # Créer le message avec l'image et le bouton
             message = {
                 "attachment": {
@@ -527,7 +535,7 @@ def handle_imdb_search(sender_id, query):
                         "elements": [
                             {
                                 "title": title,
-                                "image_url": result.get('image_url', ''),
+                                "image_url": image_url,
                                 "subtitle": result.get('stars', ''),
                                 "buttons": [
                                     {
@@ -546,6 +554,9 @@ def handle_imdb_search(sender_id, query):
                     }
                 }
             }
+            
+            # Journaliser le message complet pour le débogage
+            logger.info(f"Message IMDb complet: {json.dumps(message)}")
             
             # Envoyer le message
             payload = {
