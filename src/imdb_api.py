@@ -35,11 +35,8 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             "X-RapidAPI-Host": RAPIDAPI_HOST
         }
         
-        # Encoder la requête pour l'URL
-        encoded_query = query.replace(" ", "%20")
-        
-        # Faire la requête à l'API d'autocomplétion
-        conn.request("GET", f"/imdb/autocomplete?query={encoded_query}", headers=headers)
+        # Faire la requête à l'API d'autocomplétion avec le terme de recherche de l'utilisateur
+        conn.request("GET", f"/imdb/autocomplete?query={query}", headers=headers)
         
         # Récupérer la réponse
         res = conn.getresponse()
@@ -53,16 +50,35 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         # Analyser la réponse JSON
         response_data = json.loads(data.decode("utf-8"))
         
+        # Journaliser la structure de la réponse pour le débogage
+        logger.info(f"Structure de la réponse: {list(response_data.keys())}")
+        
         # Extraire les résultats
         results = []
-        for item in response_data.get("results", [])[:limit]:
+        items = response_data.get("results", [])
+        
+        # Si aucun résultat n'est trouvé, vérifier d'autres clés possibles
+        if not items and "d" in response_data:
+            items = response_data.get("d", [])
+        
+        for item in items[:limit]:
             # Déterminer le type (film ou série)
             item_type = "film"
-            if "TV Series" in item.get("description", "") or "TV Show" in item.get("description", ""):
+            description = item.get("description", "")
+            
+            if not description and "qid" in item:
+                # Format alternatif
+                if item.get("qid") == "tvSeries" or item.get("q") == "TV series":
+                    item_type = "série"
+            elif "TV Series" in description or "TV Show" in description:
                 item_type = "série"
             
             # Extraire l'ID IMDb
             imdb_id = item.get("id", "")
+            if not imdb_id and "id" in item:
+                imdb_id = item.get("id", "")
+            
+            # Nettoyer l'ID si nécessaire
             if imdb_id.startswith("/title/"):
                 imdb_id = imdb_id.replace("/title/", "").rstrip("/")
             
@@ -71,20 +87,35 @@ def search_imdb(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             
             # Extraire l'année
             year = ""
-            description = item.get("description", "")
             year_match = re.search(r'(\d{4})', description)
             if year_match:
                 year = year_match.group(1)
+            elif "y" in item:
+                year = item.get("y", "")
             
             # Extraire les stars/acteurs (si disponible dans la description)
             stars = description
+            if not stars and "s" in item:
+                stars = item.get("s", "")
             
             # Extraire l'image
-            image_url = item.get("image", {}).get("url", "") if isinstance(item.get("image"), dict) else item.get("image", "")
+            image_url = ""
+            if "image" in item:
+                if isinstance(item["image"], dict):
+                    image_url = item["image"].get("url", "")
+                else:
+                    image_url = item.get("image", "")
+            elif "i" in item and isinstance(item["i"], dict):
+                image_url = item["i"].get("imageUrl", "")
+            
+            # Extraire le titre
+            title = item.get("title", "")
+            if not title and "l" in item:
+                title = item.get("l", "Titre inconnu")
             
             # Ajouter le résultat
             results.append({
-                "title": item.get("title", "Titre inconnu"),
+                "title": title,
                 "type": item_type,
                 "imdb_id": imdb_id,
                 "imdb_url": imdb_url,
@@ -133,20 +164,14 @@ def get_imdb_details(imdb_id: str) -> Optional[Dict[str, Any]]:
         if res.status != 200:
             logger.error(f"Erreur lors de la récupération des détails IMDb: {res.status} - {data.decode('utf-8', errors='ignore')}")
             
-            # Créer un objet de détails minimal avec l'ID IMDb
-            return {
-                "title": "Titre inconnu",
-                "type": "film",
-                "imdb_id": imdb_id,
-                "imdb_url": f"https://www.imdb.com/title/{imdb_id}/",
-                "image_url": "",
-                "year": "",
-                "rating": "",
-                "plot": ""
-            }
+            # Essayer une autre approche - rechercher par ID
+            return fallback_get_details(imdb_id)
         
         # Analyser la réponse JSON
         movie_data = json.loads(data.decode("utf-8"))
+        
+        # Journaliser la structure de la réponse pour le débogage
+        logger.info(f"Structure de la réponse des détails: {list(movie_data.keys())}")
         
         # Déterminer le type (film ou série)
         item_type = "film"
@@ -192,14 +217,89 @@ def get_imdb_details(imdb_id: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Erreur lors de la récupération des détails IMDb: {str(e)}")
         logger.error(traceback.format_exc())
         
-        # En cas d'erreur, retourner un objet minimal
-        return {
-            "title": "Titre inconnu",
-            "type": "film",
-            "imdb_id": imdb_id,
-            "imdb_url": f"https://www.imdb.com/title/{imdb_id}/",
-            "image_url": "",
-            "year": "",
-            "rating": "",
-            "plot": ""
+        # En cas d'erreur, essayer la méthode de secours
+        return fallback_get_details(imdb_id)
+
+def fallback_get_details(imdb_id: str) -> Dict[str, Any]:
+    """
+    Méthode de secours pour obtenir les détails d'un film ou d'une série
+    
+    Args:
+        imdb_id: ID IMDb du film ou de la série
+        
+    Returns:
+        Détails du film ou de la série
+    """
+    try:
+        # Essayer de rechercher le titre par ID
+        conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
+        
+        headers = {
+            "X-RapidAPI-Key": RAPIDAPI_KEY,
+            "X-RapidAPI-Host": RAPIDAPI_HOST
         }
+        
+        # Essayer avec une recherche par ID
+        conn.request("GET", f"/imdb/autocomplete?query={imdb_id}", headers=headers)
+        
+        res = conn.getresponse()
+        data = res.read()
+        
+        if res.status == 200:
+            response_data = json.loads(data.decode("utf-8"))
+            
+            # Chercher dans les résultats
+            items = response_data.get("results", [])
+            if not items and "d" in response_data:
+                items = response_data.get("d", [])
+            
+            for item in items:
+                item_id = item.get("id", "")
+                if item_id.startswith("/title/"):
+                    item_id = item_id.replace("/title/", "").rstrip("/")
+                
+                if item_id == imdb_id:
+                    # Déterminer le type
+                    item_type = "film"
+                    description = item.get("description", "")
+                    if "TV Series" in description or "TV Show" in description:
+                        item_type = "série"
+                    
+                    # Extraire l'année
+                    year = ""
+                    year_match = re.search(r'(\d{4})', description)
+                    if year_match:
+                        year = year_match.group(1)
+                    
+                    # Extraire l'image
+                    image_url = ""
+                    if "image" in item:
+                        if isinstance(item["image"], dict):
+                            image_url = item["image"].get("url", "")
+                        else:
+                            image_url = item.get("image", "")
+                    
+                    return {
+                        "title": item.get("title", "Titre inconnu"),
+                        "type": item_type,
+                        "imdb_id": imdb_id,
+                        "imdb_url": f"https://www.imdb.com/title/{imdb_id}/",
+                        "image_url": image_url,
+                        "year": year,
+                        "rating": "",
+                        "plot": description
+                    }
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération des détails de secours: {str(e)}")
+    
+    # Si tout échoue, retourner un objet minimal
+    return {
+        "title": "Titre inconnu",
+        "type": "film",
+        "imdb_id": imdb_id,
+        "imdb_url": f"https://www.imdb.com/title/{imdb_id}/",
+        "image_url": "",
+        "year": "",
+        "rating": "",
+        "plot": ""
+    }
