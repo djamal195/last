@@ -202,4 +202,33 @@ def clear_old_histories() -> None:
                 
     except Exception as e:
         logger.error(f"Erreur lors du nettoyage des historiques: {str(e)}")
+        def add_message_to_history(user_id, role, content):
+    """
+    Ajoute un message à l'historique de conversation d'un utilisateur
+    
+    Args:
+        user_id: ID de l'utilisateur
+        role: Rôle du message ('user' ou 'assistant')
+        content: Contenu du message
+    """
+    try:
+        from src.database import get_db
+        import datetime
+        
+        db = get_db()
+        collection = db["conversations"]
+        
+        collection.insert_one({
+            "user_id": user_id,
+            "role": role,
+            "content": content,
+            "timestamp": datetime.datetime.now()
+        })
+        
+        return True
+    except Exception as e:
+        from src.utils.logger import get_logger
+        logger = get_logger(__name__)
+        logger.error(f"Erreur lors de l'ajout du message à l'historique: {str(e)}")
+        return False
 
