@@ -692,13 +692,14 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Si tout échoue, retourner l'URL YouTube
+        # Si tout échoue, retourner None
         logger.error("Toutes les méthodes de téléchargement ont échoué")
-        return f"https://www.youtube.com/watch?v={video_id}"
+        return None
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
-        return f"https://www.youtube.com/watch?v={video_id}"
+        # Retourner None en cas d'erreur
+        return None
 
 def stop_download_thread():
     """
@@ -729,4 +730,3 @@ def stop_download_thread():
         logger.error(f"Erreur lors de la sauvegarde de la file d'attente: {str(e)}")
     
     logger.info("Discussion de téléchargement arrêté")
-
