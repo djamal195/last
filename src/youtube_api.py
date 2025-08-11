@@ -319,6 +319,11 @@ def process_download_queue():
                 # Télécharger la vidéo
                 result = download_video(video_id, output_path)
                 
+                if result:
+                    logger.info(f"Téléchargement réussi pour {video_id}: {result}")
+                else:
+                    logger.error(f"Téléchargement échoué pour {video_id}")
+                
                 # Appeler le callback
                 if callback:
                     callback(result)
