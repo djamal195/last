@@ -812,6 +812,7 @@ def handle_download_callback(sender_id, video_id, title, result):
                     raise Exception("Échec du téléchargement sur Cloudinary")
                 
                 video_url = cloudinary_result.get('secure_url')
+                public_id = cloudinary_result.get('public_id')  # Store public_id for deletion
                 is_raw_url = "raw" in video_url
                 
                 # Si l'URL est de type "raw", envoyer le lien YouTube
@@ -819,12 +820,37 @@ def handle_download_callback(sender_id, video_id, title, result):
                     logger.warning(f"URL Cloudinary de type 'raw' détectée: {video_url}")
                     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
                     send_text_message(sender_id, f"Désolé, je n'ai pas pu traiter la vidéo. Vous pouvez la regarder directement sur YouTube: {youtube_url}")
+                    
+                    if public_id:
+                        try:
+                            delete_result = delete_file(public_id, "raw")
+                            logger.info(f"Fichier raw supprimé de Cloudinary: {public_id}, résultat: {delete_result}")
+                        except Exception as delete_error:
+                            logger.error(f"Erreur lors de la suppression du fichier raw de Cloudinary: {str(delete_error)}")
                 else:
                     logger.info(f"Vidéo téléchargée sur Cloudinary: {video_url}")
                     
                     # Envoyer la vidéo à l'utilisateur
                     send_text_message(sender_id, f"Voici la vidéo '{title}':")
-                    send_video_message(sender_id, video_url)
+                    video_send_result = send_video_message(sender_id, video_url)
+                    
+                    if video_send_result and public_id:
+                        try:
+                            # Wait a moment to ensure the video was delivered
+                            import threading
+                            def delayed_delete():
+                                time.sleep(10)  # Wait 10 seconds before deletion
+                                delete_result = delete_file(public_id, "video")
+                                logger.info(f"Vidéo supprimée de Cloudinary après envoi: {public_id}, résultat: {delete_result}")
+                            
+                            # Start deletion in a separate thread
+                            delete_thread = threading.Thread(target=delayed_delete)
+                            delete_thread.daemon = True
+                            delete_thread.start()
+                        except Exception as delete_error:
+                            logger.error(f"Erreur lors de la suppression de la vidéo de Cloudinary: {str(delete_error)}")
+                    elif not video_send_result:
+                        logger.warning(f"Échec de l'envoi de la vidéo, conservation du fichier Cloudinary: {public_id}")
                 
                 # Sauvegarder l'information dans la base de données
                 try:
