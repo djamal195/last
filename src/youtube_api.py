@@ -388,7 +388,7 @@ def download_with_youtube_search_download(video_id, output_path):
         Chemin de la vidéo téléchargée ou None en cas d'erreur
     """
     try:
-        logger.info(f"Tentative de téléchargement avec nouvelle API RapidAPI pour: {video_id}")
+        logger.info(f"Tentative de téléchargement avec nouvelle API RapidAPI (youtube-downloader-api-fast-reliable-and-easy) pour: {video_id}")
         
         # Construire l'URL YouTube complète
         youtube_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -404,7 +404,7 @@ def download_with_youtube_search_download(video_id, output_path):
         }
         
         endpoint = f"/fetch_video?url={encoded_url}"
-        logger.info(f"Appel à la nouvelle API RapidAPI: {endpoint}")
+        logger.info(f"Appel à la nouvelle API RapidAPI youtube-downloader-api-fast-reliable-and-easy: {endpoint}")
         
         # Ajouter un mécanisme de retry avec un délai
         max_retries = 3
@@ -417,53 +417,53 @@ def download_with_youtube_search_download(video_id, output_path):
                 data = res.read()
                 
                 # Journaliser le code de statut
-                logger.info(f"Code de statut de l'API (tentative {retry+1}/{max_retries}): {res.status}")
+                logger.info(f"Code de statut de la nouvelle API RapidAPI (tentative {retry+1}/{max_retries}): {res.status}")
                 
                 if res.status == 200:
                     break
                 elif res.status == 429:  # Too Many Requests
                     if retry < max_retries - 1:
                         wait_time = retry_delay * (retry + 1)
-                        logger.warning(f"Trop de requêtes, attente de {wait_time} secondes avant de réessayer...")
+                        logger.warning(f"Nouvelle API RapidAPI - Trop de requêtes, attente de {wait_time} secondes avant de réessayer...")
                         time.sleep(wait_time)
                     else:
-                        logger.error("Trop de requêtes même après plusieurs tentatives")
+                        logger.error("Nouvelle API RapidAPI - Trop de requêtes même après plusieurs tentatives")
                         return None
                 elif res.status == 403:  # Forbidden
-                    logger.error(f"Accès interdit à l'API (403): {data.decode('utf-8', errors='ignore')}")
+                    logger.error(f"Nouvelle API RapidAPI - Accès interdit (403): {data.decode('utf-8', errors='ignore')}")
                     return None
                 else:
                     if retry < max_retries - 1:
                         wait_time = retry_delay * (retry + 1)
-                        logger.warning(f"Erreur {res.status}, attente de {wait_time} secondes avant de réessayer...")
+                        logger.warning(f"Nouvelle API RapidAPI - Erreur {res.status}, attente de {wait_time} secondes avant de réessayer...")
                         time.sleep(wait_time)
                     else:
-                        logger.error(f"Erreur persistante {res.status} après plusieurs tentatives")
+                        logger.error(f"Nouvelle API RapidAPI - Erreur persistante {res.status} après plusieurs tentatives")
                         return None
             except Exception as e:
-                logger.error(f"Erreur de connexion: {str(e)}")
+                logger.error(f"Nouvelle API RapidAPI - Erreur de connexion: {str(e)}")
                 if retry < max_retries - 1:
                     wait_time = retry_delay * (retry + 1)
-                    logger.warning(f"Attente de {wait_time} secondes avant de réessayer...")
+                    logger.warning(f"Nouvelle API RapidAPI - Attente de {wait_time} secondes avant de réessayer...")
                     time.sleep(wait_time)
                 else:
-                    logger.error("Échec de connexion après plusieurs tentatives")
+                    logger.error("Nouvelle API RapidAPI - Échec de connexion après plusieurs tentatives")
                     return None
         
         if res.status != 200:
-            logger.error(f"Échec final de l'API avec statut {res.status}")
+            logger.error(f"Nouvelle API RapidAPI - Échec final avec statut {res.status}")
             return None
         
         try:
             result_text = data.decode("utf-8", errors='ignore')
-            logger.info(f"Réponse brute de la nouvelle API: {result_text[:1000]}...")
+            logger.info(f"Réponse brute de la nouvelle API RapidAPI: {result_text[:1000]}...")
             
             result = json.loads(result_text)
             
             # Vérifier si nous avons une erreur dans la réponse
             if 'error' in result or result.get('success') == False:
                 error_msg = result.get('error', result.get('message', 'Erreur inconnue'))
-                logger.error(f"Erreur dans la réponse de l'API: {error_msg}")
+                logger.error(f"Nouvelle API RapidAPI - Erreur dans la réponse: {error_msg}")
                 return None
             
             # Chercher l'URL de téléchargement dans différents champs possibles
@@ -484,7 +484,7 @@ def download_with_youtube_search_download(video_id, output_path):
                 download_url = result['formats'][0].get('url')
             
             if download_url:
-                logger.info(f"URL de téléchargement trouvée: {download_url}")
+                logger.info(f"Nouvelle API RapidAPI - URL de téléchargement trouvée: {download_url}")
                 
                 # Télécharger la vidéo avec de meilleurs headers
                 headers = {
@@ -511,51 +511,51 @@ def download_with_youtube_search_download(video_id, output_path):
                             # Vérifier si le fichier a été téléchargé correctement
                             if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
                                 file_size = os.path.getsize(output_path)
-                                logger.info(f"Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
+                                logger.info(f"Nouvelle API RapidAPI - Vidéo téléchargée avec succès: {output_path} ({file_size} octets)")
                                 
                                 # Vérifier si le fichier est un MP4 valide
                                 if is_valid_mp4(output_path):
                                     return output_path
                                 else:
-                                    logger.warning(f"Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
+                                    logger.warning(f"Nouvelle API RapidAPI - Le fichier téléchargé n'est pas un MP4 valide: {output_path}")
                                     if download_retry < max_download_retries - 1:
-                                        logger.info(f"Tentative de téléchargement {download_retry+2}/{max_download_retries}...")
+                                        logger.info(f"Nouvelle API RapidAPI - Tentative de téléchargement {download_retry+2}/{max_download_retries}...")
                                         continue
                                     return None
                             else:
-                                logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
+                                logger.error(f"Nouvelle API RapidAPI - Le fichier téléchargé n'existe pas ou est vide: {output_path}")
                                 if download_retry < max_download_retries - 1:
-                                    logger.info(f"Tentative de téléchargement {download_retry+2}/{max_download_retries}...")
+                                    logger.info(f"Nouvelle API RapidAPI - Tentative de téléchargement {download_retry+2}/{max_download_retries}...")
                                     continue
                                 return None
                         else:
-                            logger.error(f"Erreur lors du téléchargement de la vidéo: {response.status_code}")
+                            logger.error(f"Nouvelle API RapidAPI - Erreur lors du téléchargement de la vidéo: {response.status_code}")
                             if download_retry < max_download_retries - 1:
                                 wait_time = retry_delay * (download_retry + 1)
-                                logger.warning(f"Attente de {wait_time} secondes avant de réessayer le téléchargement...")
+                                logger.warning(f"Nouvelle API RapidAPI - Attente de {wait_time} secondes avant de réessayer le téléchargement...")
                                 time.sleep(wait_time)
                             else:
                                 return None
                     except requests.exceptions.RequestException as e:
-                        logger.error(f"Erreur lors de la requête de téléchargement: {str(e)}")
+                        logger.error(f"Nouvelle API RapidAPI - Erreur lors de la requête de téléchargement: {str(e)}")
                         if download_retry < max_download_retries - 1:
                             wait_time = retry_delay * (download_retry + 1)
-                            logger.warning(f"Attente de {wait_time} secondes avant de réessayer le téléchargement...")
+                            logger.warning(f"Nouvelle API RapidAPI - Attente de {wait_time} secondes avant de réessayer le téléchargement...")
                             time.sleep(wait_time)
                         else:
                             return None
                 
                 return None  # Si toutes les tentatives échouent
             else:
-                logger.error("Aucune URL de téléchargement trouvée dans la réponse")
-                logger.error(f"Structure de la réponse: {json.dumps(result, indent=2)[:500]}")
+                logger.error("Nouvelle API RapidAPI - Aucune URL de téléchargement trouvée dans la réponse")
+                logger.error(f"Nouvelle API RapidAPI - Structure de la réponse: {json.dumps(result, indent=2)[:500]}")
                 return None
             
         except json.JSONDecodeError:
-            logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8', errors='ignore')[:500]}")
+            logger.error(f"Nouvelle API RapidAPI - Impossible de décoder la réponse JSON: {data.decode('utf-8', errors='ignore')[:500]}")
             return None
     except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec la nouvelle API: {str(e)}")
+        logger.error(f"Nouvelle API RapidAPI - Erreur lors du téléchargement: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -702,7 +702,6 @@ def download_video(video_id, output_path):
             logger.info(f"Vidéo trouvée dans le cache: {cache_path}")
             
             # Copier le fichier du cache vers le chemin de sortie
-            import shutil
             shutil.copy2(cache_path, output_path)
             
             # Vérifier si le fichier a été copié correctement
@@ -722,7 +721,6 @@ def download_video(video_id, output_path):
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
-                import shutil
                 shutil.copy2(result, cache_path)
                 logger.info(f"Vidéo ajoutée au cache: {cache_path}")
             except Exception as e:
@@ -738,7 +736,6 @@ def download_video(video_id, output_path):
         if result and os.path.exists(result) and is_valid_mp4(result):
             # Ajouter la vidéo au cache
             try:
-                import shutil
                 shutil.copy2(result, cache_path)
                 logger.info(f"Vidéo ajoutée au cache: {cache_path}")
             except Exception as e:
