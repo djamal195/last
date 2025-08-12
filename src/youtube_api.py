@@ -36,8 +36,8 @@ if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
 # Configuration de l'API RapidAPI
-RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "df674bbd36msh112ab45b7712473p16f9abjsn062262165208")
-RAPIDAPI_HOST = "youtube-search-download3.p.rapidapi.com"
+RAPIDAPI_KEY = os.environ.get('RAPIDAPI_KEY', "8d49b2bba0msh354f73491c52cf7p1ed89ejsnc355746b4acb")
+RAPIDAPI_HOST = "youtube-downloader-api-fast-reliable-and-easy.p.rapidapi.com"
 
 def extract_video_id(url_or_id):
     """
@@ -378,7 +378,7 @@ def is_valid_mp4(file_path):
 
 def download_with_youtube_search_download(video_id, output_path):
     """
-    Télécharge une vidéo YouTube en utilisant l'API youtube-search-download3
+    Télécharge une vidéo YouTube en utilisant l'API youtube-downloader-api-fast-reliable-and-easy
     
     Args:
         video_id: ID de la vidéo YouTube
@@ -388,9 +388,13 @@ def download_with_youtube_search_download(video_id, output_path):
         Chemin de la vidéo téléchargée ou None en cas d'erreur
     """
     try:
-        logger.info(f"Tentative de téléchargement avec youtube-search-download3 pour: {video_id}")
+        logger.info(f"Tentative de téléchargement avec nouvelle API RapidAPI pour: {video_id}")
         
-        # Utiliser l'API youtube-search-download3 pour obtenir les liens
+        # Construire l'URL YouTube complète
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        encoded_url = quote(youtube_url, safe='')
+        
+        # Utiliser la nouvelle API RapidAPI
         conn = http.client.HTTPSConnection(RAPIDAPI_HOST)
         
         headers = {
@@ -399,9 +403,8 @@ def download_with_youtube_search_download(video_id, output_path):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        # Construire l'URL de l'endpoint - utiliser mp4 pour obtenir une vidéo
-        endpoint = f"/v1/download?v={video_id}&type=mp4"
-        logger.info(f"Appel à l'API youtube-search-download3: {endpoint}")
+        endpoint = f"/fetch_video?url={encoded_url}"
+        logger.info(f"Appel à la nouvelle API RapidAPI: {endpoint}")
         
         # Ajouter un mécanisme de retry avec un délai
         max_retries = 3
@@ -453,18 +456,34 @@ def download_with_youtube_search_download(video_id, output_path):
         
         try:
             result_text = data.decode("utf-8", errors='ignore')
-            logger.info(f"Réponse brute de l'API youtube-search-download3: {result_text[:1000]}...")
+            logger.info(f"Réponse brute de la nouvelle API: {result_text[:1000]}...")
             
             result = json.loads(result_text)
             
             # Vérifier si nous avons une erreur dans la réponse
-            if 'error' in result:
-                logger.error(f"Erreur dans la réponse de l'API: {result.get('error')}")
+            if 'error' in result or result.get('success') == False:
+                error_msg = result.get('error', result.get('message', 'Erreur inconnue'))
+                logger.error(f"Erreur dans la réponse de l'API: {error_msg}")
                 return None
             
-            # Vérifier si nous avons une URL de téléchargement
-            if 'url' in result:
+            # Chercher l'URL de téléchargement dans différents champs possibles
+            download_url = None
+            
+            # Vérifier les différents formats de réponse possibles
+            if 'download_url' in result:
+                download_url = result['download_url']
+            elif 'url' in result:
                 download_url = result['url']
+            elif 'data' in result and isinstance(result['data'], dict):
+                if 'download_url' in result['data']:
+                    download_url = result['data']['download_url']
+                elif 'url' in result['data']:
+                    download_url = result['data']['url']
+            elif 'formats' in result and isinstance(result['formats'], list) and len(result['formats']) > 0:
+                # Prendre le premier format disponible
+                download_url = result['formats'][0].get('url')
+            
+            if download_url:
                 logger.info(f"URL de téléchargement trouvée: {download_url}")
                 
                 # Télécharger la vidéo avec de meilleurs headers
@@ -529,13 +548,14 @@ def download_with_youtube_search_download(video_id, output_path):
                 return None  # Si toutes les tentatives échouent
             else:
                 logger.error("Aucune URL de téléchargement trouvée dans la réponse")
+                logger.error(f"Structure de la réponse: {json.dumps(result, indent=2)[:500]}")
                 return None
             
         except json.JSONDecodeError:
             logger.error(f"Impossible de décoder la réponse JSON: {data.decode('utf-8', errors='ignore')[:500]}")
             return None
     except Exception as e:
-        logger.error(f"Erreur lors du téléchargement avec youtube-search-download3: {str(e)}")
+        logger.error(f"Erreur lors du téléchargement avec la nouvelle API: {str(e)}")
         logger.error(traceback.format_exc())
         return None
 
@@ -710,8 +730,8 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Si yt-dlp a échoué, essayer avec l'API youtube-search-download3
-        logger.info("yt-dlp a échoué, tentative avec l'API youtube-search-download3")
+        # Si yt-dlp a échoué, essayer avec l'API youtube-downloader-api-fast-reliable-and-easy
+        logger.info("yt-dlp a échoué, tentative avec la nouvelle API RapidAPI")
         result = download_with_youtube_search_download(video_id, output_path)
         
         # Si le téléchargement a réussi, retourner le résultat
