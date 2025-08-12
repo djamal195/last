@@ -563,16 +563,20 @@ def download_with_yt_dlp(video_id, output_path):
             logger.error("yt-dlp n'est pas installé ou n'est pas accessible")
             return None
         
-        # Télécharger la vidéo avec plus d'options
-        # Ajout de --no-check-certificate pour éviter des problèmes de certificat
-        # Ajout de --force-ipv4 pour éviter des problèmes de connexion IPv6
-        # Ajout de --user-agent pour éviter d'être bloqué
+        # Télécharger la vidéo avec plus d'options pour éviter les blocages
         cmd = [
             "yt-dlp",
-            "-f", "best[ext=mp4]",
+            "-f", "best[ext=mp4]/best",  # Préférer MP4 mais accepter d'autres formats
             "--no-check-certificate",
             "--force-ipv4",
-            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--cookies-from-browser", "chrome",  # Utiliser les cookies de Chrome
+            "--sleep-interval", "1",  # Attendre 1 seconde entre les requêtes
+            "--max-sleep-interval", "3",  # Attendre maximum 3 secondes
+            "--retries", "3",  # Réessayer 3 fois en cas d'erreur
+            "--fragment-retries", "3",  # Réessayer les fragments 3 fois
+            "--extractor-retries", "3",  # Réessayer l'extraction 3 fois
+            "--no-warnings",  # Réduire les messages de warning
             "-o", output_path,
             youtube_url
         ]
@@ -581,7 +585,7 @@ def download_with_yt_dlp(video_id, output_path):
             # Ajouter un fichier pour la sortie d'erreur
             error_log = f"{output_path}.error.log"
             with open(error_log, 'w') as err_file:
-                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=err_file, text=True)
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=err_file, text=True, timeout=300)
             
             # Vérifier si l'exécution a réussi
             if result.returncode != 0:
@@ -591,13 +595,35 @@ def download_with_yt_dlp(video_id, output_path):
                 
                 logger.error(f"Erreur lors de l'exécution de yt-dlp (code {result.returncode}): {error_content[:500]}")
                 
-                # Nettoyer le fichier d'erreur
-                try:
-                    os.remove(error_log)
-                except:
-                    pass
+                if "cookies" in error_content.lower() or "sign in" in error_content.lower():
+                    logger.info("Tentative avec les cookies Firefox...")
+                    cmd_firefox = cmd.copy()
+                    cmd_firefox[cmd_firefox.index("chrome")] = "firefox"
                     
-                return None
+                    try:
+                        with open(error_log, 'w') as err_file:
+                            result = subprocess.run(cmd_firefox, stdout=subprocess.PIPE, stderr=err_file, text=True, timeout=300)
+                        
+                        if result.returncode == 0:
+                            logger.info("Téléchargement réussi avec les cookies Firefox")
+                        else:
+                            # Essayer sans cookies
+                            logger.info("Tentative sans cookies...")
+                            cmd_no_cookies = [arg for arg in cmd if arg not in ["--cookies-from-browser", "chrome"]]
+                            
+                            with open(error_log, 'w') as err_file:
+                                result = subprocess.run(cmd_no_cookies, stdout=subprocess.PIPE, stderr=err_file, text=True, timeout=300)
+                    except subprocess.TimeoutExpired:
+                        logger.error("Timeout lors du téléchargement avec yt-dlp")
+                        return None
+                
+                if result.returncode != 0:
+                    # Nettoyer le fichier d'erreur
+                    try:
+                        os.remove(error_log)
+                    except:
+                        pass
+                    return None
             
             # Nettoyer le fichier d'erreur
             try:
@@ -620,6 +646,9 @@ def download_with_yt_dlp(video_id, output_path):
                 logger.error(f"Le fichier téléchargé n'existe pas ou est vide: {output_path}")
                 return None
                 
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout lors du téléchargement avec yt-dlp")
+            return None
         except subprocess.CalledProcessError as e:
             logger.error(f"Erreur lors de l'exécution de yt-dlp: {str(e)}")
             return None
@@ -666,7 +695,23 @@ def download_video(video_id, output_path):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # Essayer de télécharger avec l'API youtube-search-download3
+        logger.info("Tentative de téléchargement avec yt-dlp")
+        result = download_with_yt_dlp(video_id, output_path)
+        
+        # Si yt-dlp a réussi, retourner le résultat
+        if result and os.path.exists(result) and is_valid_mp4(result):
+            # Ajouter la vidéo au cache
+            try:
+                import shutil
+                shutil.copy2(result, cache_path)
+                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
+            except Exception as e:
+                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
+            
+            return result
+        
+        # Si yt-dlp a échoué, essayer avec l'API youtube-search-download3
+        logger.info("yt-dlp a échoué, tentative avec l'API youtube-search-download3")
         result = download_with_youtube_search_download(video_id, output_path)
         
         # Si le téléchargement a réussi, retourner le résultat
@@ -681,29 +726,13 @@ def download_video(video_id, output_path):
             
             return result
         
-        # Si l'API a échoué, essayer directement avec yt-dlp
-        logger.info("L'API youtube-search-download3 a échoué, tentative avec yt-dlp")
-        
-        # Si yt-dlp a réussi, retourner le résultat
-        result = download_with_yt_dlp(video_id, output_path)
-        if result and os.path.exists(result) and is_valid_mp4(result):
-            # Ajouter la vidéo au cache
-            try:
-                import shutil
-                shutil.copy2(result, cache_path)
-                logger.info(f"Vidéo ajoutée au cache: {cache_path}")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout de la vidéo au cache: {str(e)}")
-            
-            return result
-        
         # Si tout échoue, retourner None
         logger.error("Toutes les méthodes de téléchargement ont échoué")
         return None
+        
     except Exception as e:
         logger.error(f"Erreur lors du téléchargement de la vidéo: {str(e)}")
         logger.error(traceback.format_exc())
-        # Retourner None en cas d'erreur
         return None
 
 def stop_download_thread():
