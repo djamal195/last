@@ -5,7 +5,6 @@ import http.client
 import traceback
 from typing import List, Dict, Any, Optional
 from src.utils.logger import get_logger
-from src.conversation_memory import get_conversation_history, add_message_to_history
 
 logger = get_logger(__name__)
 
@@ -23,7 +22,7 @@ def generate_mistral_response(prompt: str, user_id: str = None) -> str:
     
     Args:
         prompt: Message de l'utilisateur
-        user_id: ID de l'utilisateur pour récupérer l'historique
+        user_id: ID de l'utilisateur (non utilisé maintenant)
         
     Returns:
         Réponse générée
@@ -35,25 +34,7 @@ def generate_mistral_response(prompt: str, user_id: str = None) -> str:
             logger.error("Clé API RapidAPI manquante")
             return "Désolé, je ne peux pas générer de réponse pour le moment. La configuration de l'API est incomplète."
         
-        # Récupérer l'ID de conversation si disponible dans l'historique
         conversation_id = None
-        if user_id:
-            try:
-                # Vérifier si nous avons déjà un ID de conversation stocké pour cet utilisateur
-                # Ceci est une simplification - vous devrez implémenter le stockage des IDs de conversation
-                # dans votre système de gestion de l'historique
-                conversation_id = get_conversation_id_for_user(user_id)
-                logger.info(f"ID de conversation récupéré pour l'utilisateur {user_id}: {conversation_id}")
-            except Exception as e:
-                logger.error(f"Erreur lors de la récupération de l'ID de conversation: {str(e)}")
-        
-        # Ajouter le message de l'utilisateur à l'historique
-        if user_id:
-            try:
-                add_message_to_history(user_id, "user", prompt)
-                logger.info(f"Message ajouté à l'historique pour l'utilisateur {user_id}, rôle: user")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout du message à l'historique: {str(e)}")
         
         logger.info(f"Envoi de la requête à Copilot avec conversation_id: {conversation_id}")
         
@@ -74,14 +55,6 @@ def generate_mistral_response(prompt: str, user_id: str = None) -> str:
                     logger.error(f"Erreur lors du stockage de l'ID de conversation: {str(e)}")
         else:
             response_text = "Désolé, je n'ai pas pu générer de réponse. Veuillez réessayer plus tard."
-        
-        # Ajouter la réponse à l'historique
-        if user_id and not response_text.startswith("Désolé, je n'ai pas pu générer de réponse"):
-            try:
-                add_message_to_history(user_id, "assistant", response_text)
-                logger.info(f"Réponse ajoutée à l'historique pour l'utilisateur {user_id}, rôle: assistant")
-            except Exception as e:
-                logger.error(f"Erreur lors de l'ajout de la réponse à l'historique: {str(e)}")
         
         logger.info(f"Réponse Copilot émise: {response_text[:50]}...")
         return response_text
